@@ -12,8 +12,14 @@ import "./App.css";
 import { supabase } from "./supabase";
 import AiCoachCard from "./components/AiCoachCard";
 import AiChatCard from "./components/AiChatCard";
+import AuthScreen from "./components/AuthScreen";
+
+const goalStorageKey = (userId) => `healthMpvGoalWeight_${userId}`;
 
 function App() {
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
   const [recordDate, setRecordDate] = useState("");
   const [weight, setWeight] = useState("");
   const [notes, setNotes] = useState("");
@@ -33,7 +39,6 @@ function App() {
 
   const [heightInches, setHeightInches] = useState("65");
 
-  const GOAL_WEIGHT_STORAGE_KEY = "healthMpvGoalWeight";
   const [goalInput, setGoalInput] = useState("");
   const [savedGoal, setSavedGoal] = useState(null);
   const [goalError, setGoalError] = useState(null);
@@ -63,11 +68,15 @@ function App() {
   const [editCheckinNotes, setEditCheckinNotes] = useState("");
   const [checkinUpdateStatus, setCheckinUpdateStatus] = useState(null);
 
+  const currentUser = session?.user ?? null;
+
   const fetchRecords = async () => {
+    if (!currentUser) return;
     setLoadingRecords(true);
     const { data, error } = await supabase
       .from("health_records")
       .select("*")
+      .eq("user_id", currentUser.id)
       .order("record_date", { ascending: false });
 
     if (error) {
@@ -80,10 +89,12 @@ function App() {
   };
 
   const fetchCheckins = async () => {
+    if (!currentUser) return;
     setLoadingCheckins(true);
     const { data, error } = await supabase
       .from("daily_checkins")
       .select("*")
+      .eq("user_id", currentUser.id)
       .order("checkin_date", { ascending: false })
       .order("created_at", { ascending: false });
 
@@ -96,23 +107,64 @@ function App() {
     setLoadingCheckins(false);
   };
 
+  // Restore any existing session on load, then just keep local state in sync —
+  // no async Supabase calls happen inside this callback itself.
   useEffect(() => {
-    fetchRecords();
-    fetchCheckins();
+    supabase.auth.getSession().then(({ data: { session: existingSession } }) => {
+      setSession(existingSession);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
+  // Reacts to the session changing (not the auth callback itself) — this is
+  // where the actual async data fetching / clearing happens.
   useEffect(() => {
-    const stored = localStorage.getItem(GOAL_WEIGHT_STORAGE_KEY);
-    if (stored === null) return;
+    if (currentUser) {
+      fetchRecords();
+      fetchCheckins();
+    } else {
+      setRecords([]);
+      setCheckins([]);
+      setListError(null);
+      setCheckinListError(null);
+      setLoadingRecords(false);
+      setLoadingCheckins(false);
+    }
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setSavedGoal(null);
+      setGoalInput("");
+      setGoalError(null);
+      return;
+    }
+
+    const stored = localStorage.getItem(goalStorageKey(currentUser.id));
+    if (stored === null) {
+      setSavedGoal(null);
+      setGoalInput("");
+      return;
+    }
 
     const num = Number(stored);
     if (!Number.isNaN(num) && num > 0) {
       setSavedGoal(num);
       setGoalInput(String(num));
     }
-  }, []);
+  }, [currentUser?.id]);
 
   const handleSaveGoal = () => {
+    if (!currentUser) return;
+
     const trimmed = goalInput.trim();
     const num = Number(trimmed);
 
@@ -123,14 +175,16 @@ function App() {
 
     setGoalError(null);
     setSavedGoal(num);
-    localStorage.setItem(GOAL_WEIGHT_STORAGE_KEY, String(num));
+    localStorage.setItem(goalStorageKey(currentUser.id), String(num));
   };
 
   const handleClearGoal = () => {
+    if (!currentUser) return;
+
     setGoalError(null);
     setSavedGoal(null);
     setGoalInput("");
-    localStorage.removeItem(GOAL_WEIGHT_STORAGE_KEY);
+    localStorage.removeItem(goalStorageKey(currentUser.id));
   };
 
   const validateCheckin = (date, sleep, water, exercise) => {
@@ -174,6 +228,7 @@ function App() {
 
     const { error } = await supabase.from("daily_checkins").insert([
       {
+        user_id: currentUser.id,
         checkin_date: checkinDate,
         sleep_hours: sleepHours === "" ? null : Number(sleepHours),
         water_cups: waterCups === "" ? null : Number(waterCups),
@@ -204,7 +259,11 @@ function App() {
     if (!confirmed) return;
 
     setCheckinDeleteStatus(null);
-    const { error } = await supabase.from("daily_checkins").delete().eq("id", id);
+    const { error } = await supabase
+      .from("daily_checkins")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", currentUser.id);
 
     if (error) {
       setCheckinDeleteStatus({ type: "error", message: error.message });
@@ -260,6 +319,7 @@ function App() {
         notes: editCheckinNotes,
       })
       .eq("id", id)
+      .eq("user_id", currentUser.id)
       .select();
 
     if (error) {
@@ -284,6 +344,7 @@ function App() {
 
     const { error } = await supabase.from("health_records").insert([
       {
+        user_id: currentUser.id,
         record_date: recordDate,
         weight: weight === "" ? null : Number(weight),
         notes,
@@ -308,7 +369,11 @@ function App() {
     if (!confirmed) return;
 
     setDeleteStatus(null);
-    const { error } = await supabase.from("health_records").delete().eq("id", id);
+    const { error } = await supabase
+      .from("health_records")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", currentUser.id);
 
     if (error) {
       setDeleteStatus({ type: "error", message: error.message });
@@ -344,6 +409,7 @@ function App() {
         notes: editNotes,
       })
       .eq("id", id)
+      .eq("user_id", currentUser.id)
       .select();
 
     if (error) {
@@ -419,9 +485,38 @@ function App() {
 
   const latestCheckin = checkins[0];
 
+  const handleSignOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      console.error("[App] sign out failed:", error.message);
+    }
+    // onAuthStateChange picks up the SIGNED_OUT event and clears state.
+  };
+
+  if (authLoading) {
+    return (
+      <div className="page">
+        <div className="dashboard">
+          <p className="empty-text">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <AuthScreen />;
+  }
+
   return (
     <div className="page">
       <div className="dashboard">
+        <div className="auth-bar">
+          <span className="auth-email">{currentUser.email}</span>
+          <button onClick={handleSignOut} className="btn btn-cancel">
+            Sign Out
+          </button>
+        </div>
+
         <header className="dashboard-header">
           <h1 className="dashboard-title">❤️ Health MPV Dashboard</h1>
           <p className="dashboard-subtitle">Track your health records and progress.</p>
