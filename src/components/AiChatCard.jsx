@@ -6,7 +6,7 @@ const STARTER_QUESTIONS = [
   "How close am I to my goal?",
 ];
 
-function AiChatCard({ records, goalWeight, checkins }) {
+function AiChatCard({ records, goalWeight, checkins, labResults }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -31,7 +31,7 @@ function AiChatCard({ records, goalWeight, checkins }) {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: nextMessages, records, goalWeight, checkins }),
+        body: JSON.stringify({ messages: nextMessages, records, goalWeight, checkins, labResults }),
       });
 
       // The dev proxy (or a dead backend) can return a non-JSON or empty body

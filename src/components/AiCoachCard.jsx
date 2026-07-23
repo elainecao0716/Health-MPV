@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-function AiCoachCard({ records, goalWeight, checkins }) {
+function AiCoachCard({ records, goalWeight, checkins, labResults }) {
   const [advice, setAdvice] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -13,7 +13,7 @@ function AiCoachCard({ records, goalWeight, checkins }) {
       const response = await fetch("/api/coach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ records, goalWeight, checkins }),
+        body: JSON.stringify({ records, goalWeight, checkins, labResults }),
       });
 
       const data = await response.json();

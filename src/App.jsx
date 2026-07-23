@@ -3,6 +3,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -13,8 +14,49 @@ import { supabase } from "./supabase";
 import AiCoachCard from "./components/AiCoachCard";
 import AiChatCard from "./components/AiChatCard";
 import AuthScreen from "./components/AuthScreen";
+import {
+  findLabPreset,
+  getPresetDefaultUnit,
+  getPresetRangeForUnit,
+} from "./data/labReferencePresets";
 
 const goalStorageKey = (userId) => `healthMpvGoalWeight_${userId}`;
+const labFavoritesStorageKey = (userId) => `healthMpvLabFavorites_${userId}`;
+
+// Only fills fields that are currently blank — never overwrites what the user typed.
+const computePresetAutoFill = (testName, current) => {
+  const preset = findLabPreset(testName);
+  if (!preset) return {};
+
+  const presetUnit = getPresetDefaultUnit(preset);
+  const range = getPresetRangeForUnit(preset, presetUnit);
+  const patch = {};
+
+  if (current.category === "") patch.category = preset.category;
+  if (current.unit === "" && presetUnit) patch.unit = presetUnit;
+  if (range) {
+    if (current.referenceLow === "") patch.referenceLow = String(range.low);
+    if (current.referenceHigh === "") patch.referenceHigh = String(range.high);
+  }
+
+  return patch;
+};
+
+// Explicit "Use suggested range" action — overwrites regardless of blank state.
+const computePresetForceApply = (testName) => {
+  const preset = findLabPreset(testName);
+  if (!preset) return null;
+
+  const presetUnit = getPresetDefaultUnit(preset);
+  const range = getPresetRangeForUnit(preset, presetUnit);
+
+  return {
+    category: preset.category,
+    unit: presetUnit ?? "",
+    referenceLow: range ? String(range.low) : "",
+    referenceHigh: range ? String(range.high) : "",
+  };
+};
 
 function App() {
   const [session, setSession] = useState(null);
@@ -68,6 +110,71 @@ function App() {
   const [editCheckinNotes, setEditCheckinNotes] = useState("");
   const [checkinUpdateStatus, setCheckinUpdateStatus] = useState(null);
 
+  const QUICK_TEST_NAMES = [
+    "Platelets",
+    "WBC",
+    "RBC",
+    "Hemoglobin",
+    "Hematocrit",
+    "MCV",
+    "Vitamin D",
+    "Vitamin B12",
+    "Ferritin",
+    "Iron",
+    "Glucose",
+    "HbA1c",
+    "Total Cholesterol",
+    "LDL",
+    "HDL",
+    "Triglycerides",
+    "TSH",
+  ];
+  const LAB_CATEGORIES = ["CBC", "Metabolic", "Vitamins", "Lipids", "Thyroid", "Glucose", "Iron", "Other"];
+
+  const [labTestDate, setLabTestDate] = useState("");
+  const [labTestName, setLabTestName] = useState("");
+  const [labCategory, setLabCategory] = useState("");
+  const [labResultValue, setLabResultValue] = useState("");
+  const [labUnit, setLabUnit] = useState("");
+  const [labReferenceLow, setLabReferenceLow] = useState("");
+  const [labReferenceHigh, setLabReferenceHigh] = useState("");
+  const [labLabName, setLabLabName] = useState("");
+  const [labNotes, setLabNotes] = useState("");
+  const [labStatus, setLabStatus] = useState(null);
+  const [labSaving, setLabSaving] = useState(false);
+  // Tracks whether the current reference range came from a preset or was
+  // typed by hand, so a later unit change can safely drop a now-incompatible
+  // preset range without touching anything the user entered themselves.
+  const [labRangeSource, setLabRangeSource] = useState(null); // "preset" | "custom" | null
+
+  const [favoriteTestNames, setFavoriteTestNames] = useState([]);
+
+  const [labResults, setLabResults] = useState([]);
+  const [loadingLabResults, setLoadingLabResults] = useState(true);
+  const [labListError, setLabListError] = useState(null);
+  const [labDeleteStatus, setLabDeleteStatus] = useState(null);
+
+  const [editingLabId, setEditingLabId] = useState(null);
+  const [editLabTestDate, setEditLabTestDate] = useState("");
+  const [editLabTestName, setEditLabTestName] = useState("");
+  const [editLabCategory, setEditLabCategory] = useState("");
+  const [editLabResultValue, setEditLabResultValue] = useState("");
+  const [editLabUnit, setEditLabUnit] = useState("");
+  const [editLabReferenceLow, setEditLabReferenceLow] = useState("");
+  const [editLabReferenceHigh, setEditLabReferenceHigh] = useState("");
+  const [editLabLabName, setEditLabLabName] = useState("");
+  const [editLabNotes, setEditLabNotes] = useState("");
+  const [editLabRangeSource, setEditLabRangeSource] = useState(null); // "preset" | "custom" | null
+  const [labUpdateStatus, setLabUpdateStatus] = useState(null);
+
+  const [labFilterTestName, setLabFilterTestName] = useState("");
+  const [labFilterCategory, setLabFilterCategory] = useState("");
+  const [labFilterStartDate, setLabFilterStartDate] = useState("");
+  const [labFilterEndDate, setLabFilterEndDate] = useState("");
+  const [labSearchQuery, setLabSearchQuery] = useState("");
+
+  const [selectedChartTest, setSelectedChartTest] = useState("");
+
   const currentUser = session?.user ?? null;
 
   const fetchRecords = async () => {
@@ -107,6 +214,25 @@ function App() {
     setLoadingCheckins(false);
   };
 
+  const fetchLabResults = async () => {
+    if (!currentUser) return;
+    setLoadingLabResults(true);
+    const { data, error } = await supabase
+      .from("lab_results")
+      .select("*")
+      .eq("user_id", currentUser.id)
+      .order("test_date", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setLabListError(error.message);
+    } else {
+      setLabListError(null);
+      setLabResults(data);
+    }
+    setLoadingLabResults(false);
+  };
+
   // Restore any existing session on load, then just keep local state in sync —
   // no async Supabase calls happen inside this callback itself.
   useEffect(() => {
@@ -130,13 +256,17 @@ function App() {
     if (currentUser) {
       fetchRecords();
       fetchCheckins();
+      fetchLabResults();
     } else {
       setRecords([]);
       setCheckins([]);
+      setLabResults([]);
       setListError(null);
       setCheckinListError(null);
+      setLabListError(null);
       setLoadingRecords(false);
       setLoadingCheckins(false);
+      setLoadingLabResults(false);
     }
   }, [currentUser?.id]);
 
@@ -161,6 +291,40 @@ function App() {
       setGoalInput(String(num));
     }
   }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setFavoriteTestNames([]);
+      return;
+    }
+
+    const stored = localStorage.getItem(labFavoritesStorageKey(currentUser.id));
+    if (stored === null) {
+      setFavoriteTestNames([]);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(stored);
+      setFavoriteTestNames(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      setFavoriteTestNames([]);
+    }
+  }, [currentUser?.id]);
+
+  const handleToggleFavoriteTest = (testName) => {
+    if (!currentUser) return;
+    const trimmed = testName.trim();
+    if (!trimmed) return;
+
+    setFavoriteTestNames((prev) => {
+      const next = prev.includes(trimmed)
+        ? prev.filter((name) => name !== trimmed)
+        : [...prev, trimmed];
+      localStorage.setItem(labFavoritesStorageKey(currentUser.id), JSON.stringify(next));
+      return next;
+    });
+  };
 
   const handleSaveGoal = () => {
     if (!currentUser) return;
@@ -337,6 +501,300 @@ function App() {
     }
   };
 
+  const validateLabResult = (date, testName, resultValue, refLow, refHigh) => {
+    if (!date) return "Test date is required.";
+    if (!testName || !testName.trim()) return "Test name is required.";
+
+    if (resultValue === "" || Number.isNaN(Number(resultValue))) {
+      return "Result must be numeric.";
+    }
+
+    if (refLow !== "" && Number.isNaN(Number(refLow))) {
+      return "Reference low must be numeric.";
+    }
+
+    if (refHigh !== "" && Number.isNaN(Number(refHigh))) {
+      return "Reference high must be numeric.";
+    }
+
+    if (refLow !== "" && refHigh !== "" && Number(refLow) > Number(refHigh)) {
+      return "Reference low cannot be greater than reference high.";
+    }
+
+    return null;
+  };
+
+  // A simple reference-range comparison, not a diagnosis.
+  const computeLabStatus = (resultValue, refLow, refHigh) => {
+    const hasLow = typeof refLow === "number";
+    const hasHigh = typeof refHigh === "number";
+    if (!hasLow && !hasHigh) return "No Range";
+    if (hasLow && resultValue < refLow) return "Low";
+    if (hasHigh && resultValue > refHigh) return "High";
+    return "In Range";
+  };
+
+  const applyLabTestNameChange = (value) => {
+    setLabTestName(value);
+    const patch = computePresetAutoFill(value, {
+      category: labCategory,
+      unit: labUnit,
+      referenceLow: labReferenceLow,
+      referenceHigh: labReferenceHigh,
+    });
+    if (patch.category !== undefined) setLabCategory(patch.category);
+    if (patch.unit !== undefined) setLabUnit(patch.unit);
+    if (patch.referenceLow !== undefined || patch.referenceHigh !== undefined) {
+      if (patch.referenceLow !== undefined) setLabReferenceLow(patch.referenceLow);
+      if (patch.referenceHigh !== undefined) setLabReferenceHigh(patch.referenceHigh);
+      setLabRangeSource("preset");
+    }
+  };
+
+  const handleLabUnitChange = (value) => {
+    setLabUnit(value);
+    if (labRangeSource === "preset") {
+      const preset = findLabPreset(labTestName);
+      const presetUnit = getPresetDefaultUnit(preset);
+      if (preset && value !== presetUnit) {
+        setLabReferenceLow("");
+        setLabReferenceHigh("");
+        setLabRangeSource(null);
+      }
+    }
+  };
+
+  const handleUseSuggestedRange = () => {
+    const patch = computePresetForceApply(labTestName);
+    if (!patch) return;
+    setLabCategory(patch.category);
+    setLabUnit(patch.unit);
+    setLabReferenceLow(patch.referenceLow);
+    setLabReferenceHigh(patch.referenceHigh);
+    setLabRangeSource("preset");
+  };
+
+  const handleClearLabRange = () => {
+    setLabReferenceLow("");
+    setLabReferenceHigh("");
+    setLabRangeSource(null);
+  };
+
+  const applyEditLabTestNameChange = (value) => {
+    setEditLabTestName(value);
+    const patch = computePresetAutoFill(value, {
+      category: editLabCategory,
+      unit: editLabUnit,
+      referenceLow: editLabReferenceLow,
+      referenceHigh: editLabReferenceHigh,
+    });
+    if (patch.category !== undefined) setEditLabCategory(patch.category);
+    if (patch.unit !== undefined) setEditLabUnit(patch.unit);
+    if (patch.referenceLow !== undefined || patch.referenceHigh !== undefined) {
+      if (patch.referenceLow !== undefined) setEditLabReferenceLow(patch.referenceLow);
+      if (patch.referenceHigh !== undefined) setEditLabReferenceHigh(patch.referenceHigh);
+      setEditLabRangeSource("preset");
+    }
+  };
+
+  const handleEditLabUnitChange = (value) => {
+    setEditLabUnit(value);
+    if (editLabRangeSource === "preset") {
+      const preset = findLabPreset(editLabTestName);
+      const presetUnit = getPresetDefaultUnit(preset);
+      if (preset && value !== presetUnit) {
+        setEditLabReferenceLow("");
+        setEditLabReferenceHigh("");
+        setEditLabRangeSource(null);
+      }
+    }
+  };
+
+  const handleUseSuggestedRangeEdit = () => {
+    const patch = computePresetForceApply(editLabTestName);
+    if (!patch) return;
+    setEditLabCategory(patch.category);
+    setEditLabUnit(patch.unit);
+    setEditLabReferenceLow(patch.referenceLow);
+    setEditLabReferenceHigh(patch.referenceHigh);
+    setEditLabRangeSource("preset");
+  };
+
+  const handleClearLabRangeEdit = () => {
+    setEditLabReferenceLow("");
+    setEditLabReferenceHigh("");
+    setEditLabRangeSource(null);
+  };
+
+  const isLabResultCustomRange = (lab) => {
+    const preset = findLabPreset(lab.test_name);
+    if (!preset) return false;
+    const range = getPresetRangeForUnit(preset, lab.unit);
+    if (!range) return false;
+    if (lab.reference_low === null || lab.reference_high === null) return false;
+    return lab.reference_low !== range.low || lab.reference_high !== range.high;
+  };
+
+  const handleSaveLabResult = async (e) => {
+    e.preventDefault();
+    setLabStatus(null);
+
+    const validationError = validateLabResult(
+      labTestDate,
+      labTestName,
+      labResultValue,
+      labReferenceLow,
+      labReferenceHigh
+    );
+    if (validationError) {
+      setLabStatus({ type: "error", message: validationError });
+      return;
+    }
+
+    setLabSaving(true);
+
+    const resultNum = Number(labResultValue);
+    const refLowNum = labReferenceLow === "" ? null : Number(labReferenceLow);
+    const refHighNum = labReferenceHigh === "" ? null : Number(labReferenceHigh);
+
+    const { error } = await supabase.from("lab_results").insert([
+      {
+        user_id: currentUser.id,
+        test_date: labTestDate,
+        test_name: labTestName.trim(),
+        category: labCategory === "" ? null : labCategory,
+        result_value: resultNum,
+        unit: labUnit === "" ? null : labUnit,
+        reference_low: refLowNum,
+        reference_high: refHighNum,
+        status: computeLabStatus(resultNum, refLowNum, refHighNum),
+        lab_name: labLabName === "" ? null : labLabName,
+        notes: labNotes,
+      },
+    ]);
+
+    if (error) {
+      setLabStatus({ type: "error", message: error.message });
+    } else {
+      setLabStatus({ type: "success", message: "Lab result saved!" });
+      setLabTestDate("");
+      setLabTestName("");
+      setLabCategory("");
+      setLabResultValue("");
+      setLabUnit("");
+      setLabReferenceLow("");
+      setLabReferenceHigh("");
+      setLabLabName("");
+      setLabNotes("");
+      setLabRangeSource(null);
+      await fetchLabResults();
+    }
+
+    setLabSaving(false);
+  };
+
+  const handleDeleteLabResult = async (id) => {
+    const confirmed = window.confirm("Delete this lab result?");
+    if (!confirmed) return;
+
+    setLabDeleteStatus(null);
+    const { error } = await supabase
+      .from("lab_results")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", currentUser.id);
+
+    if (error) {
+      setLabDeleteStatus({ type: "error", message: error.message });
+    } else {
+      setLabDeleteStatus({ type: "success", message: "Deleted!" });
+      await fetchLabResults();
+    }
+  };
+
+  const handleLabEditClick = (lab) => {
+    setLabUpdateStatus(null);
+    setEditingLabId(lab.id);
+    setEditLabTestDate(lab.test_date);
+    setEditLabTestName(lab.test_name);
+    setEditLabCategory(lab.category ?? "");
+    setEditLabResultValue(String(lab.result_value));
+    setEditLabUnit(lab.unit ?? "");
+    setEditLabReferenceLow(lab.reference_low ?? "");
+    setEditLabReferenceHigh(lab.reference_high ?? "");
+    setEditLabLabName(lab.lab_name ?? "");
+    setEditLabNotes(lab.notes ?? "");
+    // null (not "preset") so opening edit never risks clearing the historical
+    // range if the unit happens to get touched during this session.
+    setEditLabRangeSource(null);
+  };
+
+  const handleLabCancelEdit = () => {
+    setEditingLabId(null);
+    setEditLabTestDate("");
+    setEditLabTestName("");
+    setEditLabCategory("");
+    setEditLabResultValue("");
+    setEditLabUnit("");
+    setEditLabReferenceLow("");
+    setEditLabReferenceHigh("");
+    setEditLabLabName("");
+    setEditLabNotes("");
+    setEditLabRangeSource(null);
+  };
+
+  const handleUpdateLabResult = async (id) => {
+    setLabUpdateStatus(null);
+
+    const validationError = validateLabResult(
+      editLabTestDate,
+      editLabTestName,
+      editLabResultValue,
+      editLabReferenceLow,
+      editLabReferenceHigh
+    );
+    if (validationError) {
+      setLabUpdateStatus({ type: "error", message: validationError });
+      return;
+    }
+
+    const resultNum = Number(editLabResultValue);
+    const refLowNum = editLabReferenceLow === "" ? null : Number(editLabReferenceLow);
+    const refHighNum = editLabReferenceHigh === "" ? null : Number(editLabReferenceHigh);
+
+    const { data, error } = await supabase
+      .from("lab_results")
+      .update({
+        test_date: editLabTestDate,
+        test_name: editLabTestName.trim(),
+        category: editLabCategory === "" ? null : editLabCategory,
+        result_value: resultNum,
+        unit: editLabUnit === "" ? null : editLabUnit,
+        reference_low: refLowNum,
+        reference_high: refHighNum,
+        status: computeLabStatus(resultNum, refLowNum, refHighNum),
+        lab_name: editLabLabName === "" ? null : editLabLabName,
+        notes: editLabNotes,
+      })
+      .eq("id", id)
+      .eq("user_id", currentUser.id)
+      .select();
+
+    if (error) {
+      setLabUpdateStatus({ type: "error", message: error.message });
+    } else if (!data || data.length === 0) {
+      setLabUpdateStatus({
+        type: "error",
+        message:
+          "Update did not apply — no row was changed. This usually means there is no Row Level Security UPDATE policy allowing this change in Supabase.",
+      });
+    } else {
+      setLabUpdateStatus({ type: "success", message: "Updated!" });
+      handleLabCancelEdit();
+      await fetchLabResults();
+    }
+  };
+
   const handleSave = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -484,6 +942,59 @@ function App() {
   const goalReached = progressPercent !== null && progressPercent >= 100;
 
   const latestCheckin = checkins[0];
+
+  const distinctLabTestNames = [...new Set(labResults.map((l) => l.test_name))].sort();
+
+  const filteredLabResults = labResults.filter((lab) => {
+    if (labFilterTestName && lab.test_name !== labFilterTestName) return false;
+    if (labFilterCategory && lab.category !== labFilterCategory) return false;
+    if (labFilterStartDate && lab.test_date < labFilterStartDate) return false;
+    if (labFilterEndDate && lab.test_date > labFilterEndDate) return false;
+
+    if (labSearchQuery.trim() !== "") {
+      const q = labSearchQuery.trim().toLowerCase();
+      const haystack = `${lab.test_name} ${lab.category ?? ""} ${lab.lab_name ?? ""} ${
+        lab.notes ?? ""
+      }`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+
+    return true;
+  });
+
+  const totalLabResults = labResults.length;
+  const latestLabResult = labResults[0];
+  const outOfRangeLabCount = labResults.filter(
+    (l) => l.status === "Low" || l.status === "High"
+  ).length;
+  const labTestsTracked = distinctLabTestNames.length;
+
+  // Only chart entries that share the most recent unit for this test, per
+  // "do not combine tests with different units in the same chart."
+  const chartTestEntries = labResults.filter((l) => l.test_name === selectedChartTest);
+  const chartUnit = chartTestEntries[0]?.unit ?? null;
+  const chartMatchingUnitEntries = chartTestEntries.filter((l) => (l.unit ?? null) === chartUnit);
+  const chartDataPoints = [...chartMatchingUnitEntries].sort(
+    (a, b) => new Date(a.test_date) - new Date(b.test_date)
+  );
+  const chartReferenceLow = chartMatchingUnitEntries.find(
+    (l) => typeof l.reference_low === "number"
+  )?.reference_low ?? null;
+  const chartReferenceHigh = chartMatchingUnitEntries.find(
+    (l) => typeof l.reference_high === "number"
+  )?.reference_high ?? null;
+
+  const formatLabDate = (dateStr) => {
+    const [, month, day] = dateStr.split("-");
+    return `${month}/${day}`;
+  };
+
+  const labStatusClass = (labStatusValue) => {
+    if (labStatusValue === "Low") return "lab-status lab-status-low";
+    if (labStatusValue === "High") return "lab-status lab-status-high";
+    if (labStatusValue === "In Range") return "lab-status lab-status-in-range";
+    return "lab-status lab-status-no-range";
+  };
 
   const handleSignOut = async () => {
     const { error } = await supabase.auth.signOut();
@@ -951,9 +1462,648 @@ function App() {
           </div>
         </div>
 
-        <AiCoachCard records={records} goalWeight={savedGoal} checkins={checkins} />
+        <div className="summary-cards">
+          <div className="summary-card">
+            <div className="summary-label">Total Lab Results</div>
+            <div className="summary-value">{totalLabResults}</div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-label">Latest Test</div>
+            <div className="summary-value">{latestLabResult?.test_name ?? "--"}</div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-label">Latest Test Date</div>
+            <div className="summary-value">{latestLabResult?.test_date ?? "--"}</div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-label">Out-of-Range Results</div>
+            <div className="summary-value">{outOfRangeLabCount}</div>
+          </div>
+          <div className="summary-card">
+            <div className="summary-label">Tests Tracked</div>
+            <div className="summary-value">{labTestsTracked}</div>
+          </div>
+        </div>
 
-        <AiChatCard records={records} goalWeight={savedGoal} checkins={checkins} />
+        <div className="card">
+          <h2 className="heading-records">🩸 Lab Results</h2>
+          <p className="hint-text">
+            Status is a simple comparison against the reference range you enter — not a diagnosis.
+          </p>
+
+          <form onSubmit={handleSaveLabResult} className="form section" noValidate>
+            <label className="field">
+              Test Date
+              <input
+                type="date"
+                value={labTestDate}
+                onChange={(e) => setLabTestDate(e.target.value)}
+                className="input"
+              />
+            </label>
+
+            <div className="field">
+              Test Name
+              {favoriteTestNames.length > 0 && (
+                <>
+                  <span className="hint-text">⭐ Favorites</span>
+                  <div className="chip-options">
+                    {favoriteTestNames.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => applyLabTestNameChange(name)}
+                        className={`btn btn-chip ${labTestName === name ? "btn-chip-selected" : ""}`}
+                      >
+                        ⭐ {name}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              <div className="chip-options">
+                {QUICK_TEST_NAMES.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => applyLabTestNameChange(name)}
+                    className={`btn btn-chip ${labTestName === name ? "btn-chip-selected" : ""}`}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+              <div className="lab-test-name-row">
+                <input
+                  type="text"
+                  value={labTestName}
+                  onChange={(e) => applyLabTestNameChange(e.target.value)}
+                  placeholder="Or type a custom test name"
+                  className="input"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleToggleFavoriteTest(labTestName)}
+                  disabled={labTestName.trim() === ""}
+                  className="btn btn-cancel"
+                >
+                  {favoriteTestNames.includes(labTestName.trim()) ? "★ Favorited" : "☆ Favorite"}
+                </button>
+              </div>
+            </div>
+
+            <label className="field">
+              Category
+              <select
+                value={labCategory}
+                onChange={(e) => setLabCategory(e.target.value)}
+                className="input"
+              >
+                <option value="">No category</option>
+                {LAB_CATEGORIES.map((cat) => (
+                  <option key={cat} value={cat}>
+                    {cat}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="field">
+              Result
+              <input
+                type="number"
+                step="any"
+                value={labResultValue}
+                onChange={(e) => setLabResultValue(e.target.value)}
+                className="input"
+              />
+            </label>
+
+            <label className="field">
+              Unit
+              <input
+                type="text"
+                value={labUnit}
+                onChange={(e) => handleLabUnitChange(e.target.value)}
+                placeholder="e.g. K/uL, ng/mL"
+                className="input"
+              />
+            </label>
+
+            <p className="hint-text">
+              Suggested range only. Use the reference range printed on your laboratory report.
+            </p>
+
+            <label className="field">
+              Reference Low
+              <input
+                type="number"
+                step="any"
+                value={labReferenceLow}
+                onChange={(e) => {
+                  setLabReferenceLow(e.target.value);
+                  setLabRangeSource("custom");
+                }}
+                className="input"
+              />
+            </label>
+
+            <label className="field">
+              Reference High
+              <input
+                type="number"
+                step="any"
+                value={labReferenceHigh}
+                onChange={(e) => {
+                  setLabReferenceHigh(e.target.value);
+                  setLabRangeSource("custom");
+                }}
+                className="input"
+              />
+            </label>
+
+            <div className="goal-actions">
+              <button type="button" onClick={handleUseSuggestedRange} className="btn btn-chip">
+                Use suggested range
+              </button>
+              <button type="button" onClick={handleClearLabRange} className="btn btn-cancel">
+                Clear range
+              </button>
+            </div>
+
+            <label className="field">
+              Lab Name
+              <input
+                type="text"
+                value={labLabName}
+                onChange={(e) => setLabLabName(e.target.value)}
+                className="input"
+              />
+            </label>
+
+            <label className="field">
+              Notes
+              <textarea
+                value={labNotes}
+                onChange={(e) => setLabNotes(e.target.value)}
+                rows={4}
+                className="input"
+              />
+            </label>
+
+            <button type="submit" disabled={labSaving} className="btn btn-save">
+              {labSaving ? "Saving..." : "Save Lab Result"}
+            </button>
+          </form>
+
+          {labStatus && (
+            <p
+              className={`message ${
+                labStatus.type === "success" ? "message-success" : "message-error"
+              }`}
+            >
+              {labStatus.message}
+            </p>
+          )}
+
+          <div className="section">
+            <h3 className="heading-records">Filter & Search</h3>
+            <div className="lab-filters">
+              <label className="field">
+                Test Name
+                <select
+                  value={labFilterTestName}
+                  onChange={(e) => setLabFilterTestName(e.target.value)}
+                  className="input"
+                >
+                  <option value="">All tests</option>
+                  {distinctLabTestNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field">
+                Category
+                <select
+                  value={labFilterCategory}
+                  onChange={(e) => setLabFilterCategory(e.target.value)}
+                  className="input"
+                >
+                  <option value="">All categories</option>
+                  {LAB_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="field">
+                Start Date
+                <input
+                  type="date"
+                  value={labFilterStartDate}
+                  onChange={(e) => setLabFilterStartDate(e.target.value)}
+                  className="input"
+                />
+              </label>
+
+              <label className="field">
+                End Date
+                <input
+                  type="date"
+                  value={labFilterEndDate}
+                  onChange={(e) => setLabFilterEndDate(e.target.value)}
+                  className="input"
+                />
+              </label>
+
+              <label className="field">
+                Search
+                <input
+                  type="text"
+                  value={labSearchQuery}
+                  onChange={(e) => setLabSearchQuery(e.target.value)}
+                  placeholder="Search test, category, lab, notes"
+                  className="input"
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="section">
+            <h3 className="heading-records">📈 Lab Trend</h3>
+            <label className="field">
+              Test
+              <select
+                value={selectedChartTest}
+                onChange={(e) => setSelectedChartTest(e.target.value)}
+                className="input"
+              >
+                <option value="">Choose a test</option>
+                {distinctLabTestNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedChartTest === "" ? (
+              <p className="empty-text section">Choose a test above to see its trend.</p>
+            ) : chartDataPoints.length < 2 ? (
+              <p className="empty-text section">
+                Add at least 2 "{selectedChartTest}" results to see a trend.
+              </p>
+            ) : (
+              <div className="chart-wrapper">
+                <p className="hint-text">
+                  {selectedChartTest}
+                  {chartUnit ? ` (${chartUnit})` : ""}
+                </p>
+                <ResponsiveContainer width="100%" height={280}>
+                  <LineChart data={chartDataPoints}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e6eaf0" />
+                    <XAxis
+                      dataKey="test_date"
+                      tickFormatter={formatLabDate}
+                      tick={{ fontSize: 12 }}
+                    />
+                    <YAxis domain={["auto", "auto"]} tick={{ fontSize: 12 }} />
+                    <Tooltip
+                      formatter={(value) => [value, selectedChartTest]}
+                      labelFormatter={formatLabDate}
+                    />
+                    {chartReferenceLow !== null && (
+                      <ReferenceLine
+                        y={chartReferenceLow}
+                        stroke="#e0453c"
+                        strokeDasharray="4 4"
+                        label={{ value: "Low", fontSize: 11, fill: "#e0453c" }}
+                      />
+                    )}
+                    {chartReferenceHigh !== null && (
+                      <ReferenceLine
+                        y={chartReferenceHigh}
+                        stroke="#e0453c"
+                        strokeDasharray="4 4"
+                        label={{ value: "High", fontSize: 11, fill: "#e0453c" }}
+                      />
+                    )}
+                    <Line
+                      type="monotone"
+                      dataKey="result_value"
+                      stroke="#2f6feb"
+                      strokeWidth={2}
+                      dot={{ r: 3 }}
+                      activeDot={{ r: 5 }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+
+          <div className="section">
+            <h3 className="heading-records">Lab History</h3>
+
+            {labListError && <p className="message message-error">{labListError}</p>}
+
+            {labDeleteStatus && (
+              <p
+                className={`message ${
+                  labDeleteStatus.type === "success" ? "message-success" : "message-error"
+                }`}
+              >
+                {labDeleteStatus.message}
+              </p>
+            )}
+
+            {labUpdateStatus && (
+              <p
+                className={`message ${
+                  labUpdateStatus.type === "success" ? "message-success" : "message-error"
+                }`}
+              >
+                {labUpdateStatus.message}
+              </p>
+            )}
+
+            {!labListError && !loadingLabResults && labResults.length === 0 && (
+              <p className="empty-text">No lab results yet.</p>
+            )}
+
+            {!labListError &&
+              labResults.length > 0 &&
+              filteredLabResults.length === 0 && (
+                <p className="empty-text">No lab results match your filters.</p>
+              )}
+
+            {!labListError && filteredLabResults.length > 0 && (
+              <ul className="records-list">
+                {filteredLabResults.map((lab) => (
+                  <li key={lab.id} className="record-card">
+                    {editingLabId === lab.id ? (
+                      <div className="form">
+                        <label className="field">
+                          Test Date
+                          <input
+                            type="date"
+                            value={editLabTestDate}
+                            onChange={(e) => setEditLabTestDate(e.target.value)}
+                            className="input"
+                          />
+                        </label>
+
+                        <div className="field">
+                          Test Name
+                          {favoriteTestNames.length > 0 && (
+                            <>
+                              <span className="hint-text">⭐ Favorites</span>
+                              <div className="chip-options">
+                                {favoriteTestNames.map((name) => (
+                                  <button
+                                    key={name}
+                                    type="button"
+                                    onClick={() => applyEditLabTestNameChange(name)}
+                                    className={`btn btn-chip ${
+                                      editLabTestName === name ? "btn-chip-selected" : ""
+                                    }`}
+                                  >
+                                    ⭐ {name}
+                                  </button>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                          <div className="chip-options">
+                            {QUICK_TEST_NAMES.map((name) => (
+                              <button
+                                key={name}
+                                type="button"
+                                onClick={() => applyEditLabTestNameChange(name)}
+                                className={`btn btn-chip ${
+                                  editLabTestName === name ? "btn-chip-selected" : ""
+                                }`}
+                              >
+                                {name}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="lab-test-name-row">
+                            <input
+                              type="text"
+                              value={editLabTestName}
+                              onChange={(e) => applyEditLabTestNameChange(e.target.value)}
+                              className="input"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleToggleFavoriteTest(editLabTestName)}
+                              disabled={editLabTestName.trim() === ""}
+                              className="btn btn-cancel"
+                            >
+                              {favoriteTestNames.includes(editLabTestName.trim())
+                                ? "★ Favorited"
+                                : "☆ Favorite"}
+                            </button>
+                          </div>
+                        </div>
+
+                        <label className="field">
+                          Category
+                          <select
+                            value={editLabCategory}
+                            onChange={(e) => setEditLabCategory(e.target.value)}
+                            className="input"
+                          >
+                            <option value="">No category</option>
+                            {LAB_CATEGORIES.map((cat) => (
+                              <option key={cat} value={cat}>
+                                {cat}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label className="field">
+                          Result
+                          <input
+                            type="number"
+                            step="any"
+                            value={editLabResultValue}
+                            onChange={(e) => setEditLabResultValue(e.target.value)}
+                            className="input"
+                          />
+                        </label>
+
+                        <label className="field">
+                          Unit
+                          <input
+                            type="text"
+                            value={editLabUnit}
+                            onChange={(e) => handleEditLabUnitChange(e.target.value)}
+                            className="input"
+                          />
+                        </label>
+
+                        <p className="hint-text">
+                          Suggested range only. Use the reference range printed on your laboratory
+                          report.
+                        </p>
+
+                        <label className="field">
+                          Reference Low
+                          <input
+                            type="number"
+                            step="any"
+                            value={editLabReferenceLow}
+                            onChange={(e) => {
+                              setEditLabReferenceLow(e.target.value);
+                              setEditLabRangeSource("custom");
+                            }}
+                            className="input"
+                          />
+                        </label>
+
+                        <label className="field">
+                          Reference High
+                          <input
+                            type="number"
+                            step="any"
+                            value={editLabReferenceHigh}
+                            onChange={(e) => {
+                              setEditLabReferenceHigh(e.target.value);
+                              setEditLabRangeSource("custom");
+                            }}
+                            className="input"
+                          />
+                        </label>
+
+                        <div className="goal-actions">
+                          <button
+                            type="button"
+                            onClick={handleUseSuggestedRangeEdit}
+                            className="btn btn-chip"
+                          >
+                            Use suggested range
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleClearLabRangeEdit}
+                            className="btn btn-cancel"
+                          >
+                            Clear range
+                          </button>
+                        </div>
+
+                        <label className="field">
+                          Lab Name
+                          <input
+                            type="text"
+                            value={editLabLabName}
+                            onChange={(e) => setEditLabLabName(e.target.value)}
+                            className="input"
+                          />
+                        </label>
+
+                        <label className="field">
+                          Notes
+                          <textarea
+                            value={editLabNotes}
+                            onChange={(e) => setEditLabNotes(e.target.value)}
+                            rows={4}
+                            className="input"
+                          />
+                        </label>
+
+                        <div className="record-actions">
+                          <button
+                            onClick={() => handleUpdateLabResult(lab.id)}
+                            className="btn btn-save"
+                          >
+                            Save Changes
+                          </button>
+                          <button onClick={handleLabCancelEdit} className="btn btn-cancel">
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="record-row">
+                          <strong>Date:</strong> {lab.test_date}
+                        </div>
+                        <div className="record-row">
+                          <strong>Test:</strong> {lab.test_name}
+                        </div>
+                        <div className="record-row">
+                          <strong>Result:</strong> {lab.result_value}
+                          {lab.unit ? ` ${lab.unit}` : ""}
+                        </div>
+                        <div className="record-row">
+                          <strong>Reference Range:</strong>{" "}
+                          {lab.reference_low !== null && lab.reference_high !== null
+                            ? `${lab.reference_low} - ${lab.reference_high}${
+                                lab.unit ? ` ${lab.unit}` : ""
+                              }`
+                            : "--"}
+                          {isLabResultCustomRange(lab) && (
+                            <span className="lab-custom-badge">Custom range</span>
+                          )}
+                        </div>
+                        <div className="record-row">
+                          <strong>Status:</strong>{" "}
+                          <span className={labStatusClass(lab.status)}>{lab.status}</span>
+                        </div>
+                        <div className="record-row">
+                          <strong>Category:</strong> {lab.category ?? "--"}
+                        </div>
+                        <div className="record-row">
+                          <strong>Lab Name:</strong> {lab.lab_name ?? "--"}
+                        </div>
+                        <div className="record-row">
+                          <strong>Notes:</strong> {lab.notes}
+                        </div>
+                        <div className="record-actions">
+                          <button
+                            onClick={() => handleLabEditClick(lab)}
+                            className="btn btn-edit"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDeleteLabResult(lab.id)}
+                            className="btn btn-delete"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <AiCoachCard
+          records={records}
+          goalWeight={savedGoal}
+          checkins={checkins}
+          labResults={labResults}
+        />
+
+        <AiChatCard
+          records={records}
+          goalWeight={savedGoal}
+          checkins={checkins}
+          labResults={labResults}
+        />
 
         <div className="card">
           <h2 className="heading-records">📈 Weight Trend</h2>
