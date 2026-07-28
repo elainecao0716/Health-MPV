@@ -13,12 +13,16 @@ import "./App.css";
 import { supabase } from "./supabase";
 import AiCoachCard from "./components/AiCoachCard";
 import AiChatCard from "./components/AiChatCard";
+import AiLabInsightsCard from "./components/AiLabInsightsCard";
+import VisitSummaryCard from "./components/VisitSummaryCard";
+import ImportLabReportCard from "./components/ImportLabReportCard";
 import AuthScreen from "./components/AuthScreen";
 import {
   findLabPreset,
   getPresetDefaultUnit,
   getPresetRangeForUnit,
 } from "./data/labReferencePresets";
+import { computeLabStatus } from "./utils/labAnalysis";
 
 const goalStorageKey = (userId) => `healthMpvGoalWeight_${userId}`;
 const labFavoritesStorageKey = (userId) => `healthMpvLabFavorites_${userId}`;
@@ -522,16 +526,6 @@ function App() {
     }
 
     return null;
-  };
-
-  // A simple reference-range comparison, not a diagnosis.
-  const computeLabStatus = (resultValue, refLow, refHigh) => {
-    const hasLow = typeof refLow === "number";
-    const hasHigh = typeof refHigh === "number";
-    if (!hasLow && !hasHigh) return "No Range";
-    if (hasLow && resultValue < refLow) return "Low";
-    if (hasHigh && resultValue > refHigh) return "High";
-    return "In Range";
   };
 
   const applyLabTestNameChange = (value) => {
@@ -2091,6 +2085,14 @@ function App() {
           </div>
         </div>
 
+        <ImportLabReportCard
+          labResults={labResults}
+          currentUser={currentUser}
+          onImported={fetchLabResults}
+        />
+
+        <AiLabInsightsCard labResults={labResults} />
+
         <AiCoachCard
           records={records}
           goalWeight={savedGoal}
@@ -2103,6 +2105,13 @@ function App() {
           goalWeight={savedGoal}
           checkins={checkins}
           labResults={labResults}
+        />
+
+        <VisitSummaryCard
+          records={records}
+          checkins={checkins}
+          labResults={labResults}
+          savedGoal={savedGoal}
         />
 
         <div className="card">
