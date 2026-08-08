@@ -140,21 +140,46 @@ const normalizeDateString = (raw) => {
   return null; // never guess an ambiguous or unrecognized date
 };
 
+const DATE_TOKEN = "[\\d]{1,4}[/-][\\d]{1,2}[/-][\\d]{1,4}";
+
+// Labs this app explicitly supports — matched against the letterhead/header text directly rather
+// than relying on a generic "Laboratory: X" label, which most real reports don't actually print
+// for their own name (it shows up as a plain title/logo line instead, e.g. "SUN CLINICAL
+// LABORATORIES" or "Quest Diagnostics" in a footer, with no leading "Laboratory:" at all).
+const KNOWN_LAB_PATTERNS = [
+  { pattern: /sun\s+clinical\s+laborator\w*/i, name: "Sun Clinical Laboratories" },
+  { pattern: /quest\s+diagnostics/i, name: "Quest Diagnostics" },
+];
+
+// Exported for direct unit testing.
+export const detectKnownLabName = (text) => {
+  if (!text) return null;
+  for (const { pattern, name } of KNOWN_LAB_PATTERNS) {
+    if (pattern.test(text)) return name;
+  }
+  return null;
+};
+
 export const parseReportMetadata = (fullText) => {
   const patientMatch = fullText.match(/patient(?:\s*name)?\s*[:-]\s*([A-Za-z][A-Za-z .,'-]{1,60})/i);
+  // Matches both label orders labs use — "Collection Date:"/"Collected:" and "Date Collected:"/
+  // "Date of Collection:" — plus "Specimen Date:", which some labs use instead of "Collection".
   const collectionMatch = fullText.match(
-    /collect(?:ed|ion)(?:\s*date)?\s*[:-]\s*([\d]{1,4}[/-][\d]{1,2}[/-][\d]{1,4})/i
+    new RegExp(`(?:date\\s*(?:of\\s*)?)?(?:collect(?:ed|ion)|specimen)(?:\\s*date)?\\s*[:-]\\s*(${DATE_TOKEN})`, "i")
   );
   const reportMatch = fullText.match(
-    /report(?:ed)?(?:\s*date)?\s*[:-]\s*([\d]{1,4}[/-][\d]{1,2}[/-][\d]{1,4})/i
+    new RegExp(`(?:date\\s*(?:of\\s*)?)?report(?:ed)?(?:\\s*date)?\\s*[:-]\\s*(${DATE_TOKEN})`, "i")
   );
+  // A generic "Laboratory: X" label is a fallback for reports outside the known-lab list above —
+  // it rarely matches Sun Clinical or Quest's own letterhead, which is exactly why those two are
+  // matched explicitly first.
   const labMatch = fullText.match(/laborator(?:y|ies)\s*[:-]\s*([A-Za-z][A-Za-z0-9 .,'&-]{1,60})/i);
 
   return {
     patientName: patientMatch ? patientMatch[1].trim() : null,
     collectionDate: normalizeDateString(collectionMatch?.[1] ?? null),
     reportDate: normalizeDateString(reportMatch?.[1] ?? null),
-    labName: labMatch ? labMatch[1].trim() : null,
+    labName: detectKnownLabName(fullText) ?? (labMatch ? labMatch[1].trim() : null),
   };
 };
 
@@ -181,6 +206,16 @@ const REFERENCE_RANGE_LINE_PATTERN = /^reference\s+range\b\s*:?\s*(.*)$/i;
 const RESULT_LINE_PATTERN =
   /^([A-Za-z][A-Za-z0-9 /\-.,()]{1,45}?)\s{1,}(-?\d+(?:\.\d+)?)\s*([A-Za-z%µ/^0-9]{0,15})?\s*(?:[([]?\s*(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)\s*[)\]]?)?\s*(HIGH|LOW|ABNORMAL|CRITICAL|H|L|A|C)?\s*$/i;
 
+// A trailing abnormal-flag token on its own at the end of a result line (e.g. "GLUCOSE 123 H",
+// where the unit/range already came from a preceding "Reference Range:" line and nothing else
+// follows the value). Peeled off BEFORE RESULT_LINE_PATTERN runs: that pattern's own unit group
+// and flag group can both match a bare token like "H", and since greedy backtracking always
+// prefers filling the earlier (unit) group first when either reading lets the overall match
+// succeed, a same-line-unit-less flagged row was silently misread as unit="H", flag=null. Peeling
+// the flag off first removes the ambiguity — whatever's left has nothing for the unit group to
+// wrongly grab.
+const TRAILING_FLAG_PATTERN = /\s+(HIGH|LOW|ABNORMAL|CRITICAL|H|L|A|C)\s*$/i;
+
 const FLAG_LABELS = {
   H: "High",
   HIGH: "High",
@@ -201,7 +236,8 @@ const cleanRangeUnit = (raw) => {
 
 // Parses the text after "Reference Range:" into { referenceLow, referenceHigh, unit }, or null
 // if it's not a numeric range (e.g. "NEGATIVE", "YELLOW", "NO REFERENCE RANGE").
-const parseReferenceRangeDescriptor = (text) => {
+// Exported for direct unit testing.
+export const parseReferenceRangeDescriptor = (text) => {
   const trimmed = text.trim();
 
   let m = trimmed.match(/^(?:<=|<\s*(?:OR\s*=)?)\s*(-?\d+(?:\.\d+)?)\s*(.*)$/i);
@@ -216,7 +252,8 @@ const parseReferenceRangeDescriptor = (text) => {
   return null;
 };
 
-const parseLabResultLines = (pagesText) => {
+// Exported for direct unit testing.
+export const parseLabResultLines = (pagesText) => {
   const candidates = [];
 
   for (const { pageNumber, lines } of pagesText) {
@@ -240,7 +277,11 @@ const parseLabResultLines = (pagesText) => {
         continue;
       }
 
-      const match = line.match(RESULT_LINE_PATTERN);
+      const trailingFlagMatch = line.match(TRAILING_FLAG_PATTERN);
+      const peeledFlag = trailingFlagMatch ? FLAG_LABELS[trailingFlagMatch[1].toUpperCase()] ?? null : null;
+      const lineForResultMatch = trailingFlagMatch ? line.slice(0, trailingFlagMatch.index) : line;
+
+      const match = lineForResultMatch.match(RESULT_LINE_PATTERN);
       if (!match) {
         pendingRange = null;
         continue;
@@ -264,7 +305,7 @@ const parseLabResultLines = (pagesText) => {
         unit: unitRaw ? unitRaw.trim() : appliedRange?.unit ?? null,
         referenceLow: hasOwnRange ? Number(lowStr) : appliedRange?.referenceLow ?? null,
         referenceHigh: hasOwnRange ? Number(highStr) : appliedRange?.referenceHigh ?? null,
-        extractedFlag: flagRaw ? FLAG_LABELS[flagRaw.toUpperCase()] ?? null : null,
+        extractedFlag: peeledFlag ?? (flagRaw ? FLAG_LABELS[flagRaw.toUpperCase()] ?? null : null),
       });
     }
   }
@@ -280,7 +321,8 @@ const nextDraftId = () => {
   return `draft-${Date.now()}-${draftIdCounter}`;
 };
 
-const buildDraftRow = (candidate, reportMeta, extra = {}) => {
+// Exported for direct unit testing.
+export const buildDraftRow = (candidate, reportMeta, extra = {}) => {
   const preset = findLabPreset(candidate.rawLabel);
   const normalizedName = preset ? preset.canonicalName : candidate.rawLabel;
   const presetUnit = getPresetDefaultUnit(preset);
@@ -348,21 +390,49 @@ const OCR_SYSTEM_PROMPT =
   "several tests (e.g. a panel or category name with no result of its own) are not test rows — omit them. " +
   "For each result, include a 'confidence' field: \"High\", \"Medium\", or \"Low\", reflecting only how " +
   "confident you are in the OCR reading (legibility/certainty), never a medical judgment about the value " +
-  "itself. Respond with strict JSON only: {\"results\": [{\"test_name\": string|null, \"result_value\": " +
-  "number|null, \"unit\": string|null, \"reference_low\": number|null, \"reference_high\": number|null, " +
-  "\"flag\": string|null, \"test_date\": string|null, \"lab_name\": string|null, \"notes\": string|null, " +
-  "\"confidence\": \"High\"|\"Medium\"|\"Low\"}]}. If the page has no lab test rows, return {\"results\": []}.";
+  "itself. " +
+  "Separately from the per-row results, look for the specimen collection date printed once near the top " +
+  "of the page in a header area or table — labeled things like \"Collection Date\", \"Date Collected\", " +
+  "\"Specimen Date\", \"Draw Date\", or \"Collected\". This header is often a small table with several " +
+  "column headers in one row (e.g. \"COLLECTION DATE\", \"FINAL REPORTED DATE\", \"TIME\") and their values " +
+  "in a matching row directly below — match each value to the header directly above it by column position; " +
+  "do not assume the first date-like value belongs to the first header, and do not confuse the collection " +
+  "date with a nearby reported/received date in an adjacent column. If a collection/specimen date is " +
+  "present, report it as the top-level 'report_date' field in MM/DD/YYYY format, even though it is not " +
+  "repeated next to each individual test row. If no collection/specimen date is visible, fall back to a " +
+  "\"Reported\"/\"Report Date\" if that's the only date shown. Only set a row's own 'test_date' when that " +
+  "specific row prints a date different from the header date; otherwise leave it null and rely on " +
+  "'report_date'. " +
+  "Also separately from the per-row results, identify the name of the laboratory that performed and is " +
+  "reporting these results — usually a title or logo line at the very top of the page (e.g. \"SUN CLINICAL " +
+  "LABORATORIES\", \"Quest Diagnostics\"), not a person's name, clinic, or the ordering physician's office. " +
+  "Report it as the top-level 'lab_name' field, transcribed as printed. Leave it null if you cannot find a " +
+  "laboratory name distinct from the ordering doctor/clinic. " +
+  "Respond with strict JSON only: {\"report_date\": string|null, \"lab_name\": string|null, " +
+  "\"results\": [{\"test_name\": string|null, " +
+  "\"result_value\": number|null, \"unit\": string|null, \"reference_low\": number|null, \"reference_high\": " +
+  "number|null, \"flag\": string|null, \"test_date\": string|null, \"lab_name\": string|null, " +
+  "\"notes\": string|null, \"confidence\": \"High\"|\"Medium\"|\"Low\"}]}. If the page has no lab test rows, " +
+  "return {\"report_date\": string|null, \"lab_name\": string|null, \"results\": []}.";
 
+// Returns { results, reportDate, labName } — reportDate/labName are the header-level values the
+// model found once for the whole page, independent of any per-row test_date/lab_name.
 const parseOcrResponse = (rawText) => {
   let parsed;
   try {
     parsed = JSON.parse(rawText);
   } catch {
-    return [];
+    return { results: [], reportDate: null, labName: null };
   }
-  if (!parsed || !Array.isArray(parsed.results)) return [];
+  if (!parsed || !Array.isArray(parsed.results)) return { results: [], reportDate: null, labName: null };
 
-  return parsed.results
+  const reportDate = normalizeDateString(typeof parsed.report_date === "string" ? parsed.report_date : null);
+  const rawLabName = typeof parsed.lab_name === "string" && parsed.lab_name.trim() ? parsed.lab_name.trim() : null;
+  // Normalize to the app's canonical name when it's one of the known labs; otherwise keep
+  // whatever the model actually read rather than discarding a legitimate other-lab reading.
+  const labName = rawLabName ? detectKnownLabName(rawLabName) ?? rawLabName : null;
+
+  const results = parsed.results
     .filter((r) => r && typeof r === "object")
     .slice(0, 100) // defensive cap
     .map((r) => ({
@@ -377,11 +447,16 @@ const parseOcrResponse = (rawText) => {
           ? FLAG_LABELS[r.flag.trim().toUpperCase()] ?? r.flag.trim()
           : null,
       testDate: normalizeDateString(typeof r.test_date === "string" ? r.test_date : null),
-      labName: typeof r.lab_name === "string" && r.lab_name.trim() ? r.lab_name.trim() : null,
+      labName: (() => {
+        const raw = typeof r.lab_name === "string" && r.lab_name.trim() ? r.lab_name.trim() : null;
+        return raw ? detectKnownLabName(raw) ?? raw : null;
+      })(),
       notes: typeof r.notes === "string" && r.notes.trim() ? r.notes.trim().slice(0, 300) : null,
       confidence: OCR_ALLOWED_CONFIDENCE.has(r.confidence) ? r.confidence : "Low", // fail-closed
     }))
     .filter((r) => r.rawLabel && typeof r.resultValue === "number");
+
+  return { results, reportDate, labName };
 };
 
 // Dense report pages (e.g. panels with embedded guideline/reference tables alongside the
@@ -414,7 +489,10 @@ const requestOcrCompletion = async ({ openai, imageDataUrl, maxTokens }) => {
   };
 };
 
-// Returns { draftRows, warnings } — bounded to MAX_OCR_PAGES pages, one vision call per page.
+// Returns { draftRows, warnings, ocrReportDate } — bounded to MAX_OCR_PAGES pages, one vision
+// call per page. ocrReportDate is the first header-level date any page reported; every row across
+// every page inherits it (unless that row itself printed a different date), matching the
+// document-level fallback the text-extraction path already gives every row via reportMeta.
 export const extractViaOcr = async ({ pdfDocument, openai, reportMeta }) => {
   const warnings = [];
   const pagesToProcess = Math.min(pdfDocument.numPages, MAX_OCR_PAGES);
@@ -423,30 +501,39 @@ export const extractViaOcr = async ({ pdfDocument, openai, reportMeta }) => {
   }
 
   const draftRows = [];
+  let ocrReportDate = null;
+  let ocrLabName = null;
   for (let pageNumber = 1; pageNumber <= pagesToProcess; pageNumber += 1) {
     const pngBuffer = await renderPageToPngBuffer(pdfDocument, pageNumber);
     const imageDataUrl = `data:image/png;base64,${pngBuffer.toString("base64")}`;
 
     let pageResults = [];
+    let pageReportDate = null;
+    let pageLabName = null;
     let stillTruncated = false;
     for (const maxTokens of OCR_MAX_TOKENS_ATTEMPTS) {
       const { rawText, truncated } = await requestOcrCompletion({ openai, imageDataUrl, maxTokens });
-      pageResults = parseOcrResponse(rawText);
+      const parsed = parseOcrResponse(rawText);
+      pageResults = parsed.results;
+      pageReportDate = parsed.reportDate;
+      pageLabName = parsed.labName;
       stillTruncated = truncated;
       if (!truncated) break; // got a complete response — no need to retry with a bigger budget
     }
     if (stillTruncated) {
       warnings.push(`Page ${pageNumber} had more results than could be read in one pass — some rows may be missing.`);
     }
+    if (ocrReportDate === null) ocrReportDate = pageReportDate;
+    if (ocrLabName === null) ocrLabName = pageLabName;
 
     for (const candidate of pageResults) {
       draftRows.push(
         buildDraftRow(
           { ...candidate, pageNumber },
           {
-            collectionDate: candidate.testDate ?? reportMeta.collectionDate,
+            collectionDate: candidate.testDate ?? ocrReportDate ?? reportMeta.collectionDate,
             reportDate: reportMeta.reportDate,
-            labName: candidate.labName ?? reportMeta.labName,
+            labName: candidate.labName ?? ocrLabName ?? reportMeta.labName,
           },
           { confidence: candidate.confidence, ocrDerived: true }
         )
@@ -454,7 +541,7 @@ export const extractViaOcr = async ({ pdfDocument, openai, reportMeta }) => {
     }
   }
 
-  return { draftRows, warnings };
+  return { draftRows, warnings, ocrReportDate, ocrLabName };
 };
 
 // --- Orchestration --------------------------------------------------------------------------
@@ -490,11 +577,18 @@ export const extractDraftLabResults = async ({ buffer, openai }) => {
       };
     }
 
-    const { draftRows, warnings } = await extractViaOcr({ pdfDocument, openai, reportMeta });
+    const { draftRows, warnings, ocrReportDate, ocrLabName } = await extractViaOcr({ pdfDocument, openai, reportMeta });
     return {
       status: "scanned_ocr",
       pageCount: pdfDocument.numPages,
-      reportMeta,
+      // The scanned PDF's text layer is empty, so reportMeta above never finds a date or lab name
+      // — surface the OCR model's header-level reading here too, so the summary UI matches what
+      // every row actually inherited.
+      reportMeta: {
+        ...reportMeta,
+        collectionDate: reportMeta.collectionDate ?? ocrReportDate,
+        labName: reportMeta.labName ?? ocrLabName,
+      },
       draftRows,
       warnings,
     };
