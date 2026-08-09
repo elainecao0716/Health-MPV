@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import multer from "multer";
+import rateLimit from "express-rate-limit";
 import OpenAI from "openai";
 import {
   MAX_PDF_BYTES,
@@ -69,6 +70,25 @@ if (!openai) {
 const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(express.json({ limit: "1mb" }));
+
+// Per-IP request caps on the endpoints that cost OpenAI credits or CPU (AI calls, PDF/OCR
+// processing) — /api/health and static responses stay unlimited. Standard headers only
+// (RateLimit-*); legacy X-RateLimit-* headers are disabled since nothing here depends on them.
+const aiRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please wait a few minutes and try again." },
+});
+
+const pdfImportRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many PDF imports. Please wait a few minutes and try again." },
+});
 
 // Memory storage only — the uploaded PDF is never written to disk, so there is no temp file to
 // clean up: the buffer lives on `req.file.buffer` for the duration of the request and is garbage
@@ -253,7 +273,7 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/api/coach", async (req, res) => {
+app.post("/api/coach", aiRateLimiter, async (req, res) => {
   const { records, goalWeight, checkins, labResults } = req.body ?? {};
 
   if (!isReasonableArray(records)) {
@@ -327,7 +347,7 @@ app.post("/api/coach", async (req, res) => {
   }
 });
 
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", aiRateLimiter, async (req, res) => {
   const { messages, records, goalWeight, checkins, labResults } = req.body ?? {};
 
   if (!isReasonableArray(messages)) {
@@ -419,7 +439,7 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-app.post("/api/lab-insights", async (req, res) => {
+app.post("/api/lab-insights", aiRateLimiter, async (req, res) => {
   const { mode, testName, labResults } = req.body ?? {};
 
   if (mode !== "single" && mode !== "all") {
@@ -515,7 +535,7 @@ app.post("/api/lab-insights", async (req, res) => {
   }
 });
 
-app.post("/api/labs/import-pdf", (req, res) => {
+app.post("/api/labs/import-pdf", pdfImportRateLimiter, (req, res) => {
   pdfUpload(req, res, async (uploadErr) => {
     const requestId = Math.random().toString(36).slice(2, 10);
     const startedAt = Date.now();
