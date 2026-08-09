@@ -96,6 +96,9 @@ function App() {
   const [listError, setListError] = useState(null);
   const [deleteStatus, setDeleteStatus] = useState(null); // { type: "success" | "error", message: string }
   const [deletingRecordId, setDeletingRecordId] = useState(null); // guards against a double-click firing two deletes
+  // Health Records card list — collapsed by default. Collapsing hides only the card list itself;
+  // error/status messages and the empty-state text stay visible either way.
+  const [healthRecordsExpanded, setHealthRecordsExpanded] = useState(false);
 
   const [editingId, setEditingId] = useState(null);
   const [editDate, setEditDate] = useState("");
@@ -125,6 +128,9 @@ function App() {
   const [checkinListError, setCheckinListError] = useState(null);
   const [checkinDeleteStatus, setCheckinDeleteStatus] = useState(null);
   const [deletingCheckinId, setDeletingCheckinId] = useState(null);
+  // Recent Check-Ins card list — expanded by default. Collapsing hides only the card list itself;
+  // error/status messages and the empty-state text stay visible either way.
+  const [checkinsExpanded, setCheckinsExpanded] = useState(true);
 
   const [editingCheckinId, setEditingCheckinId] = useState(null);
   const [editCheckinDate, setEditCheckinDate] = useState("");
@@ -1181,12 +1187,6 @@ function App() {
     });
   };
 
-  const latestLabResult = labResults[0];
-  const outOfRangeLabCount = labResults.filter(
-    (l) => l.status === "Low" || l.status === "High"
-  ).length;
-  const labTestsTracked = distinctLabTestNames.length;
-
   // Only chart entries that are unit-compatible for this test — see selectLabTrendSeries for what
   // "compatible" means (same unit once case/whitespace-normalized, or one side just has no unit
   // recorded). Genuinely different units (mg/dL vs mmol/L) are still never combined.
@@ -1516,7 +1516,18 @@ function App() {
           <StatusMessage status={checkinStatus} />
 
           <div className="section">
-            <h3 className="heading-records">Recent Check-Ins</h3>
+            <button
+              type="button"
+              onClick={() => setCheckinsExpanded((prev) => !prev)}
+              aria-expanded={checkinsExpanded}
+              aria-controls="recent-checkins-content"
+              className="import-section-toggle heading-records"
+            >
+              Recent Check-Ins ({checkins.length}){" "}
+              <span aria-hidden="true" className="import-section-caret">
+                {checkinsExpanded ? "▼" : "▶"}
+              </span>
+            </button>
 
             {checkinListError && (
               <p role="alert" aria-live="assertive" className="message message-error">
@@ -1531,7 +1542,8 @@ function App() {
               <p className="empty-text">No check-ins yet.</p>
             )}
 
-            {!checkinListError && checkins.length > 0 && (
+            <div id="recent-checkins-content">
+            {checkinsExpanded && !checkinListError && checkins.length > 0 && (
               <ul className="records-list">
                 {checkins.map((checkin) => (
                   <li key={checkin.id} className="record-card">
@@ -1672,29 +1684,7 @@ function App() {
                 ))}
               </ul>
             )}
-          </div>
-        </div>
-
-        <div className="summary-cards">
-          <div className="summary-card">
-            <div className="summary-label">Total Lab Results</div>
-            <div className="summary-value">{totalLabResults}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Latest Test</div>
-            <div className="summary-value">{latestLabResult?.test_name ?? "--"}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Latest Test Date</div>
-            <div className="summary-value">{latestLabResult?.test_date ?? "--"}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Out-of-Range Results</div>
-            <div className="summary-value">{outOfRangeLabCount}</div>
-          </div>
-          <div className="summary-card">
-            <div className="summary-label">Tests Tracked</div>
-            <div className="summary-value">{labTestsTracked}</div>
+            </div>
           </div>
         </div>
 
@@ -2581,7 +2571,18 @@ function App() {
         </div>
 
         <div className="card">
-          <h2 className="heading-records">Health Records</h2>
+          <button
+            type="button"
+            onClick={() => setHealthRecordsExpanded((prev) => !prev)}
+            aria-expanded={healthRecordsExpanded}
+            aria-controls="health-records-content"
+            className="import-section-toggle heading-records"
+          >
+            Health Records ({records.length}){" "}
+            <span aria-hidden="true" className="import-section-caret">
+              {healthRecordsExpanded ? "▼" : "▶"}
+            </span>
+          </button>
 
           {listError && (
             <p role="alert" aria-live="assertive" className="message message-error">
@@ -2596,7 +2597,8 @@ function App() {
             <p className="empty-text">No records yet.</p>
           )}
 
-          {!listError && records.length > 0 && (
+          <div id="health-records-content">
+          {healthRecordsExpanded && !listError && records.length > 0 && (
             <ul className="records-list">
               {records.map((record) => (
                 <li key={record.id} className="record-card">
@@ -2663,6 +2665,7 @@ function App() {
               ))}
             </ul>
           )}
+          </div>
         </div>
       </div>
     </div>
