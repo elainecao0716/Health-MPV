@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { buildVisitSummarySections, visitSummaryToPlainText } from "../utils/visitSummary";
+import StatusMessage from "./StatusMessage";
 
 function VisitSummaryCard({ records, checkins, labResults, savedGoal }) {
   const [sections, setSections] = useState(null);
@@ -37,7 +38,9 @@ function VisitSummaryCard({ records, checkins, labResults, savedGoal }) {
 
   return (
     <div className="card visit-summary-card">
-      <h2 className="heading-records">📋 Prepare Visit Summary</h2>
+      <h2 className="heading-records">
+        <span aria-hidden="true">📋</span> Prepare Visit Summary
+      </h2>
       <p className="hint-text">
         A concise, factual summary of your recorded data — no diagnoses or treatment recommendations —
         for sharing with your clinician.
@@ -71,20 +74,26 @@ function VisitSummaryCard({ records, checkins, labResults, savedGoal }) {
         <p className="hint-text section">Log a health record, check-in, or lab result first.</p>
       )}
 
-      {copyStatus && (
-        <p className={`message ${copyStatus.type === "success" ? "message-success" : "message-error"}`}>
-          {copyStatus.message}
-        </p>
-      )}
+      <StatusMessage status={copyStatus} />
 
       {sections && (
         <div className="visit-summary-print-area section">
-          <h3 className="heading-records">Visit Summary</h3>
-          <p className="hint-text">Date generated: {generatedAt.toLocaleString()}</p>
+          <h3 className="heading-records">Health MPV — Visit Summary</h3>
+          <p className="hint-text">Generated {generatedAt.toLocaleString()}</p>
 
           {sections.map((section) => (
-            <div key={section.title} className="visit-summary-section">
-              <h4 className="visit-summary-section-title">{section.title}</h4>
+            <div
+              key={section.title}
+              className={`visit-summary-section ${
+                section.title === "User-Entered Notes" ? "visit-summary-section-notes" : ""
+              }`}
+            >
+              <h4 className="visit-summary-section-title">
+                {section.title}
+                {section.title === "User-Entered Notes" && (
+                  <span className="hint-text"> — as typed by you, not calculated</span>
+                )}
+              </h4>
               <ul className="visit-summary-list">
                 {section.lines.map((line, idx) => (
                   <li key={idx}>{line}</li>
@@ -102,4 +111,4 @@ function VisitSummaryCard({ records, checkins, labResults, savedGoal }) {
   );
 }
 
-export default VisitSummaryCard;
+export default memo(VisitSummaryCard);

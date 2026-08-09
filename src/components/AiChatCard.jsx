@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 const STARTER_QUESTIONS = [
   "Summarize my progress",
@@ -84,7 +84,9 @@ function AiChatCard({ records, goalWeight, checkins, labResults }) {
 
   return (
     <div className="card ai-chat-card">
-      <h2 className="heading-records">💬 Chat with Your AI Health Coach</h2>
+      <h2 className="heading-records">
+        <span aria-hidden="true">💬</span> Chat with Your AI Health Coach
+      </h2>
       <p className="hint-text">Ask questions about your logged health records.</p>
 
       <div className="chat-starters section">
@@ -100,7 +102,7 @@ function AiChatCard({ records, goalWeight, checkins, labResults }) {
         ))}
       </div>
 
-      <div className="chat-window section">
+      <div className="chat-window section" role="log" aria-live="polite" aria-label="Conversation">
         {messages.length === 0 && (
           <p className="empty-text">Ask a question or tap a suggestion above to get started.</p>
         )}
@@ -116,20 +118,31 @@ function AiChatCard({ records, goalWeight, checkins, labResults }) {
           </div>
         ))}
 
-        {loading && <div className="chat-bubble chat-bubble-assistant chat-bubble-loading">Thinking...</div>}
+        {loading && (
+          <div className="chat-bubble chat-bubble-assistant chat-bubble-loading">Thinking...</div>
+        )}
 
         <div ref={messagesEndRef} />
       </div>
 
-      {error && <p className="message message-error">{error}</p>}
+      {error && (
+        <p role="alert" aria-live="assertive" className="message message-error">
+          {error}
+        </p>
+      )}
 
       <div className="chat-input-row section">
+        <label className="visually-hidden" htmlFor="ai-chat-input">
+          Message
+        </label>
         <input
+          id="ai-chat-input"
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Ask about your health records..."
+          aria-busy={loading}
           className="input"
         />
         <button
@@ -151,4 +164,4 @@ function AiChatCard({ records, goalWeight, checkins, labResults }) {
   );
 }
 
-export default AiChatCard;
+export default memo(AiChatCard);

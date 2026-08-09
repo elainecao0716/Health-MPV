@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 
 function AiLabInsightsCard({ labResults }) {
   const [selectedTest, setSelectedTest] = useState("");
@@ -60,7 +60,9 @@ function AiLabInsightsCard({ labResults }) {
 
   return (
     <div className="card ai-coach-card">
-      <h2 className="heading-records">🧠 Lab Insights</h2>
+      <h2 className="heading-records">
+        <span aria-hidden="true">🧠</span> Lab Insights
+      </h2>
       <p className="hint-text">
         AI-generated, plain-language summary of your lab trends — grounded in values your app already
         calculated.
@@ -88,6 +90,7 @@ function AiLabInsightsCard({ labResults }) {
             type="button"
             onClick={() => runAnalysis("single")}
             disabled={loading || labResults.length === 0}
+            aria-busy={loading}
             className="btn btn-ai"
           >
             {loading ? "Analyzing..." : "Analyze Selected Test"}
@@ -96,6 +99,7 @@ function AiLabInsightsCard({ labResults }) {
             type="button"
             onClick={() => runAnalysis("all")}
             disabled={loading || labResults.length === 0}
+            aria-busy={loading}
             className="btn btn-ai"
           >
             {loading ? "Analyzing..." : "Analyze All Recent Labs"}
@@ -107,10 +111,14 @@ function AiLabInsightsCard({ labResults }) {
         <p className="hint-text section">Add a lab result first to get insights.</p>
       )}
 
-      {error && <p className="message message-error section">{error}</p>}
+      {error && (
+        <p role="alert" aria-live="assertive" className="message message-error section">
+          {error}
+        </p>
+      )}
 
       {insights && !error && (
-        <div className="ai-advice-box section">
+        <div className="ai-advice-box section" role="status" aria-live="polite">
           {generatedAt && (
             <p className="hint-text lab-insights-timestamp">
               Generated {new Date(generatedAt).toLocaleString()}
@@ -126,4 +134,4 @@ function AiLabInsightsCard({ labResults }) {
   );
 }
 
-export default AiLabInsightsCard;
+export default memo(AiLabInsightsCard);

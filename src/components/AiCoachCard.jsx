@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 
 function AiCoachCard({ records, goalWeight, checkins, labResults }) {
   const [advice, setAdvice] = useState(null);
@@ -32,7 +32,9 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
 
   return (
     <div className="card ai-coach-card">
-      <h2 className="heading-records">🤖 AI Health Coach</h2>
+      <h2 className="heading-records">
+        <span aria-hidden="true">🤖</span> AI Health Coach
+      </h2>
       <p className="hint-text">
         Get personalized, AI-generated insights based on your logged health records.
       </p>
@@ -40,6 +42,7 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
       <button
         onClick={handleGenerate}
         disabled={loading || records.length === 0}
+        aria-busy={loading}
         className="btn btn-ai section"
       >
         {loading ? "Thinking..." : "Generate Advice"}
@@ -49,7 +52,11 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
         <p className="hint-text section">Add a health record first to get advice.</p>
       )}
 
-      {error && <p className="message message-error section">{error}</p>}
+      {error && (
+        <p role="alert" aria-live="assertive" className="message message-error section">
+          {error}
+        </p>
+      )}
 
       {advice && !error && (
         <div className="ai-advice-box section">
@@ -60,4 +67,4 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
   );
 }
 
-export default AiCoachCard;
+export default memo(AiCoachCard);

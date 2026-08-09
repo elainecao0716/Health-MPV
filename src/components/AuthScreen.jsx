@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { supabase } from "../supabase";
+import StatusMessage from "./StatusMessage";
 
 function AuthScreen() {
   const [email, setEmail] = useState("");
@@ -70,7 +71,9 @@ function AuthScreen() {
     <div className="page">
       <div className="dashboard">
         <div className="card auth-card">
-          <h1 className="dashboard-title">❤️ Health MPV</h1>
+          <h1 className="dashboard-title">
+            <span aria-hidden="true">❤️</span> Health MPV
+          </h1>
           <p className="dashboard-subtitle">Sign in or create an account to continue.</p>
 
           <form onSubmit={handleSignIn} className="form section" noValidate>
@@ -93,18 +96,22 @@ function AuthScreen() {
                 onChange={(e) => setPassword(e.target.value)}
                 className="input"
                 autoComplete="current-password"
+                aria-describedby="password-hint"
               />
             </label>
-            <p className="hint-text">Password must be at least 8 characters.</p>
+            <p id="password-hint" className="hint-text">
+              Password must be at least 8 characters.
+            </p>
 
             <div className="goal-actions">
-              <button type="submit" disabled={loading} className="btn btn-save">
+              <button type="submit" disabled={loading} aria-busy={loading} className="btn btn-save">
                 {loading ? "Please wait..." : "Sign In"}
               </button>
               <button
                 type="button"
                 onClick={handleSignUp}
                 disabled={loading}
+                aria-busy={loading}
                 className="btn btn-cancel"
               >
                 {loading ? "Please wait..." : "Sign Up"}
@@ -112,15 +119,7 @@ function AuthScreen() {
             </div>
           </form>
 
-          {status && (
-            <p
-              className={`message ${
-                status.type === "success" ? "message-success" : "message-error"
-              }`}
-            >
-              {status.message}
-            </p>
-          )}
+          <StatusMessage status={status} />
         </div>
       </div>
     </div>

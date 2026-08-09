@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { computeLabStatus } from "../utils/labAnalysis";
-import { normalizeTestName } from "../data/labReferencePresets";
 import { supabase } from "../supabase";
+import { validateDraftRow, findDuplicate } from "../utils/labDraftHelpers";
+import { rememberImportedFilename } from "../utils/importedReportFilenames";
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
 const LAB_CATEGORIES = ["CBC", "Metabolic", "Vitamins", "Lipids", "Thyroid", "Glucose", "Iron", "Other"];
@@ -10,32 +11,6 @@ const formatBytes = (bytes) => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-};
-
-// Mirrors the manual "Save Lab Result" form's validation exactly, applied to a draft row.
-const validateDraftRow = (draft) => {
-  const errors = {};
-  if (!draft.testDate) errors.testDate = "Date is required.";
-  if (!draft.testName || !draft.testName.trim()) errors.testName = "Test name is required.";
-  if (draft.resultValue === "" || Number.isNaN(Number(draft.resultValue))) {
-    errors.resultValue = "Result must be numeric.";
-  }
-  if (draft.referenceLow !== "" && Number.isNaN(Number(draft.referenceLow))) {
-    errors.referenceLow = "Reference low must be numeric.";
-  }
-  if (draft.referenceHigh !== "" && Number.isNaN(Number(draft.referenceHigh))) {
-    errors.referenceHigh = "Reference high must be numeric.";
-  }
-  if (
-    draft.referenceLow !== "" &&
-    draft.referenceHigh !== "" &&
-    !Number.isNaN(Number(draft.referenceLow)) &&
-    !Number.isNaN(Number(draft.referenceHigh)) &&
-    Number(draft.referenceLow) > Number(draft.referenceHigh)
-  ) {
-    errors.referenceHigh = "Reference low cannot exceed reference high.";
-  }
-  return errors;
 };
 
 const draftFromServerRow = (row) => ({
@@ -60,45 +35,50 @@ const draftFromServerRow = (row) => ({
   sourcePage: row.sourcePage,
 });
 
-const findDuplicate = (draft, existingLabResults) => {
-  if (!draft.testDate || draft.resultValue === "") return null;
-  const normalizedDraftName = normalizeTestName(draft.testName);
-  const draftValue = Number(draft.resultValue);
-  if (Number.isNaN(draftValue)) return null;
-
-  return (
-    existingLabResults.find(
-      (l) =>
-        normalizeTestName(l.test_name) === normalizedDraftName &&
-        l.test_date === draft.testDate &&
-        typeof l.result_value === "number" &&
-        l.result_value === draftValue &&
-        (l.unit ?? "") === (draft.unit ?? "")
-    ) ?? null
-  );
-};
-
-function ImportLabReportCard({ labResults, currentUser, onImported }) {
+function ImportLabReportCard({ labResults, currentUser, onImported, onDraftStateChange, onViewImportedReport }) {
   const fileInputRef = useRef(null);
 
   const [file, setFile] = useState(null);
+  // Display-only copy of the chosen file's name — kept alongside `file` but, unlike `file`, never
+  // released once every row is saved, so the "Filename" summary field stays accurate instead of
+  // falling back to "--" the moment the underlying File blob is freed.
+  const [fileName, setFileName] = useState(null);
   const [fileError, setFileError] = useState(null);
   const [isDragActive, setIsDragActive] = useState(false);
 
   const [uploading, setUploading] = useState(false);
   const [extractError, setExtractError] = useState(null);
-  const [importResult, setImportResult] = useState(null); // { status, pageCount, reportMeta, warnings }
+  const [importResult, setImportResult] = useState(null); // { status, pageCount, reportMeta, warnings, extractedCount }
 
   const [drafts, setDrafts] = useState([]);
   const [expandedDuplicateIds, setExpandedDuplicateIds] = useState(() => new Set());
   const [dismissedDuplicateIds, setDismissedDuplicateIds] = useState(() => new Set());
 
+  // One id per extraction, shared by every row this batch saves — this (not test_date) is a
+  // report's real identity, since two distinct reports can share the same date. Regenerated
+  // whenever a fresh set of drafts is extracted (including re-extracting the same file).
+  const [importBatchId, setImportBatchId] = useState(null);
+  // Acknowledges the "this looks like an already-imported report" banner below — required before
+  // saving is allowed once that banner is showing, so a duplicate report is never created silently.
+  const [duplicateReportAcknowledged, setDuplicateReportAcknowledged] = useState(false);
+
   const [saving, setSaving] = useState(false);
   const [saveSummary, setSaveSummary] = useState(null); // { succeeded, failed, total, failedDetails }
   const [saveBlockedMessage, setSaveBlockedMessage] = useState(null);
 
+  // Collapsed by default — the upload/review workflow is hidden behind a compact header until
+  // the user opens it, and auto-collapses again once a save fully succeeds.
+  const [importSectionExpanded, setImportSectionExpanded] = useState(false);
+
+  // Report "has an unsaved draft" up to App so it can warn before sign-out discards it — drafts
+  // only ever exist in this component's local state until "Save Selected Results" is clicked.
+  useEffect(() => {
+    onDraftStateChange?.(drafts.length > 0);
+  }, [drafts, onDraftStateChange]);
+
   const resetAll = () => {
     setFile(null);
+    setFileName(null);
     setFileError(null);
     setIsDragActive(false);
     setUploading(false);
@@ -107,6 +87,8 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
     setDrafts([]);
     setExpandedDuplicateIds(new Set());
     setDismissedDuplicateIds(new Set());
+    setImportBatchId(null);
+    setDuplicateReportAcknowledged(false);
     setSaving(false);
     setSaveSummary(null);
     setSaveBlockedMessage(null);
@@ -132,10 +114,12 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
     const validationError = validateFile(candidate);
     if (validationError) {
       setFile(null);
+      setFileName(null);
       setFileError(validationError);
       return;
     }
     setFile(candidate);
+    setFileName(candidate.name);
     setFileError(null);
   };
 
@@ -173,13 +157,21 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
         throw new Error(data?.error || `Server error (status ${response.status}).`);
       }
 
+      const extractedRows = data.draftRows ?? [];
       setImportResult({
         status: data.status,
         pageCount: data.pageCount,
         reportMeta: data.reportMeta,
         warnings: data.warnings ?? [],
+        // Fixed at extraction time, unlike drafts.length — stays accurate as rows are edited,
+        // removed, or saved out of the draft list rather than shrinking to 0 once review is done.
+        extractedCount: extractedRows.length,
       });
-      setDrafts((data.draftRows ?? []).map(draftFromServerRow));
+      setDrafts(extractedRows.map(draftFromServerRow));
+      // A fresh id per extraction — this is the report identity every row from this batch will
+      // save with, regardless of what test_date(s) end up on the rows.
+      setImportBatchId(crypto.randomUUID());
+      setDuplicateReportAcknowledged(false);
     } catch (err) {
       const message =
         err instanceof TypeError
@@ -239,6 +231,21 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
   const handleSelectNone = () => setDrafts((prev) => prev.map((d) => ({ ...d, selected: false })));
   const handleRemoveUnselected = () => setDrafts((prev) => prev.filter((d) => d.selected));
 
+  // The draft rows already carry whatever the extractor determined per row (including OCR
+  // fallbacks) — that's the same value that will actually be saved, and a more reliable source
+  // than importResult.reportMeta.labName alone, which only reflects a single separate top-level
+  // reading that can come back empty even when every row was correctly labeled. Falling back to
+  // reportMeta.labName only matters if every row is somehow missing one too.
+  const detectedLabName = drafts.find((d) => d.labName)?.labName || importResult?.reportMeta?.labName || null;
+
+  // Report-level (not per-row) duplicate signal — findDuplicate below already flags individual
+  // rows that match an already-saved result, but it's easy to click through several of those
+  // one-at-a-time warnings without registering that the whole PDF was already imported. If most of
+  // this batch already matches, that's what's actually happening — surfaced as one unmissable
+  // banner instead, requiring explicit acknowledgment before this can be saved as a new report.
+  const duplicateDraftCount = drafts.filter((d) => findDuplicate(d, labResults)).length;
+  const likelyDuplicateReport = drafts.length >= 3 && duplicateDraftCount / drafts.length >= 0.8;
+
   const handleApplyDetectedDate = () => {
     const detectedDate = importResult?.reportMeta?.collectionDate ?? importResult?.reportMeta?.reportDate;
     if (!detectedDate) return;
@@ -246,9 +253,8 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
   };
 
   const handleApplyDetectedLabName = () => {
-    const detectedLab = importResult?.reportMeta?.labName;
-    if (!detectedLab) return;
-    setDrafts((prev) => prev.map((d) => (d.labName ? d : { ...d, labName: detectedLab })));
+    if (!detectedLabName) return;
+    setDrafts((prev) => prev.map((d) => (d.labName ? d : { ...d, labName: detectedLabName })));
   };
 
   const handleBulkUseSuggestedRange = () => {
@@ -307,6 +313,16 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
       return;
     }
 
+    // Belt-and-suspenders alongside the disabled Save button — this is what actually stops the
+    // save from happening, the disabled attribute is just the visible affordance for it.
+    if (likelyDuplicateReport && !duplicateReportAcknowledged) {
+      setSaveBlockedMessage(
+        "This looks like a duplicate of a report you've already imported — check \"import this as a new " +
+          "report anyway\" above before saving, or clear the draft if you didn't mean to re-import it."
+      );
+      return;
+    }
+
     setSaving(true);
 
     const outcomes = [];
@@ -328,6 +344,8 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
           status: computeLabStatus(resultNum, refLowNum, refHighNum),
           lab_name: draft.labName === "" ? null : draft.labName,
           notes: draft.notes === "" ? null : draft.notes,
+          source_filename: fileName ?? null,
+          import_batch_id: importBatchId,
         },
       ]);
 
@@ -338,14 +356,36 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
     const failed = outcomes.filter((o) => !o.ok);
 
     // Only drop rows that actually saved — anything that failed (or wasn't selected) stays in the draft.
-    setDrafts((prev) => prev.filter((d) => !succeededIds.has(d.id)));
+    const remainingDrafts = drafts.filter((d) => !succeededIds.has(d.id));
+    setDrafts(remainingDrafts);
     setSaveSummary({
       succeeded: succeededIds.size,
       failed: failed.length,
       total: outcomes.length,
       failedDetails: failed,
+      // For "View Imported Report" — the report Lab History should jump to and expand is this
+      // whole batch's own id, not its test_date (two reports can share a date).
+      importBatchId,
     });
     setSaving(false);
+
+    // Once every row has been saved (or removed) there's nothing left to review — release the
+    // original PDF from memory. fileName/importResult/reportMeta are kept: they're small, and
+    // still give useful context (filename, page count, detected lab) alongside the "N of N saved"
+    // message, instead of the summary silently reverting to "--"/"Not detected".
+    if (remainingDrafts.length === 0) {
+      setFile(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+
+    // A fully successful save has nothing left to review — collapse the upload/review workflow
+    // back down to the compact header. A partial failure leaves rows to retry, so stays open.
+    if (failed.length === 0) {
+      setImportSectionExpanded(false);
+      // The saved rows carry their own source_filename now — this local mirror is just a fallback
+      // for rows saved before that column existed, or if a row's column value is ever missing.
+      rememberImportedFilename(currentUser.id, selectedRows[0]?.testDate ?? null, fileName);
+    }
 
     if (succeededIds.size > 0 && onImported) {
       await onImported();
@@ -355,8 +395,23 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
   const openFilePicker = () => fileInputRef.current?.click();
 
   return (
-    <div className="card import-lab-card">
-      <h2 className="heading-records">📄 Import Lab Report</h2>
+    <div className="section import-lab-card">
+      <button
+        type="button"
+        onClick={() => setImportSectionExpanded((prev) => !prev)}
+        aria-expanded={importSectionExpanded}
+        aria-controls="import-lab-report-content"
+        className="import-section-toggle heading-records"
+      >
+        <span aria-hidden="true">📄</span> Import Lab Report{" "}
+        <span aria-hidden="true" className="import-section-caret">
+          {importSectionExpanded ? "▼" : "▶"}
+        </span>
+      </button>
+
+      <div id="import-lab-report-content">
+        {importSectionExpanded && (
+          <>
       <p className="hint-text">
         Upload a PDF lab report to create editable draft results — nothing is saved until you review
         and approve it.
@@ -368,6 +423,8 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
 
       <div
         className={`import-dropzone section ${isDragActive ? "import-dropzone-active" : ""}`}
+        role="group"
+        aria-label="Upload PDF lab report"
         onDragOver={(e) => {
           e.preventDefault();
           setIsDragActive(true);
@@ -380,6 +437,7 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
           type="file"
           accept="application/pdf,.pdf"
           onChange={(e) => handleFileChosen(e.target.files?.[0] ?? null)}
+          aria-label="Choose a PDF lab report file"
           className="import-file-input"
         />
 
@@ -403,6 +461,7 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
                 type="button"
                 onClick={handleExtract}
                 disabled={uploading}
+                aria-busy={uploading}
                 className="btn btn-ai"
               >
                 {uploading ? "Extracting..." : "Extract Lab Results"}
@@ -415,42 +474,54 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
         )}
       </div>
 
-      {fileError && <p className="message message-error">{fileError}</p>}
-      {uploading && <p className="hint-text section">Processing your PDF — this can take a few seconds…</p>}
-      {extractError && <p className="message message-error section">{extractError}</p>}
+      {fileError && (
+        <p role="alert" aria-live="assertive" className="message message-error">
+          {fileError}
+        </p>
+      )}
+      {uploading && (
+        <p role="status" aria-live="polite" className="message-loading section">
+          Processing your PDF — this can take a few seconds…
+        </p>
+      )}
+      {extractError && (
+        <p role="alert" aria-live="assertive" className="message message-error section">
+          {extractError}
+        </p>
+      )}
 
       {importResult?.status === "scanned_no_ocr" && (
-        <p className="message message-error section">
+        <p role="alert" aria-live="assertive" className="message message-error section">
           This appears to be a scanned report. Scanned-PDF extraction is not available yet.
         </p>
       )}
 
-      {importResult && drafts.length === 0 && importResult.status !== "scanned_no_ocr" && (
+      {importResult && drafts.length === 0 && !saveSummary && importResult.status !== "scanned_no_ocr" && (
         <p className="hint-text section">
           No lab test rows could be extracted from this PDF. Compare it with the original report.
         </p>
       )}
 
-      {drafts.length > 0 && (
+      {(drafts.length > 0 || saveSummary) && (
         <div className="section import-review">
           <h3 className="heading-records">Review Extracted Results</h3>
 
           <div className="import-review-meta">
             <div>
-              <strong>Filename:</strong> {file?.name ?? "--"}
+              <strong>Filename:</strong> {fileName ?? "--"}
             </div>
             <div>
               <strong>Page count:</strong> {importResult?.pageCount ?? "--"}
             </div>
             <div>
-              <strong>Detected laboratory:</strong> {importResult?.reportMeta?.labName ?? "Not detected"}
+              <strong>Detected laboratory:</strong> {detectedLabName ?? "Unknown laboratory"}
             </div>
             <div>
               <strong>Detected collection/report date:</strong>{" "}
               {importResult?.reportMeta?.collectionDate ?? importResult?.reportMeta?.reportDate ?? "Not detected"}
             </div>
             <div>
-              <strong>Possible tests found:</strong> {drafts.length}
+              <strong>Possible tests found:</strong> {importResult?.extractedCount ?? drafts.length}
             </div>
             {importResult?.reportMeta?.patientName && (
               <div>
@@ -459,6 +530,24 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
               </div>
             )}
           </div>
+
+          {likelyDuplicateReport && (
+            <div className="message message-error import-duplicate-warning section">
+              <div>
+                <strong>Likely duplicate report</strong> — {duplicateDraftCount} of {drafts.length}{" "}
+                extracted rows already match results you've already saved. Saving will create a
+                second, separate report rather than merging into the existing one.
+              </div>
+              <label className="import-draft-select">
+                <input
+                  type="checkbox"
+                  checked={duplicateReportAcknowledged}
+                  onChange={(e) => setDuplicateReportAcknowledged(e.target.checked)}
+                />
+                Import this as a new report anyway
+              </label>
+            </div>
+          )}
 
           <p className="message message-error">
             Extraction may contain errors. Compare every row with the original report.
@@ -476,6 +565,8 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
             </p>
           ))}
 
+          {drafts.length > 0 && (
+          <>
           <div className="goal-actions section">
             <button type="button" onClick={handleSelectAll} className="btn btn-chip">
               Select All
@@ -497,7 +588,7 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
             <button
               type="button"
               onClick={handleApplyDetectedLabName}
-              disabled={!importResult?.reportMeta?.labName}
+              disabled={!detectedLabName}
               className="btn btn-chip"
             >
               Apply Detected Lab Name to Missing Labs
@@ -713,29 +804,72 @@ function ImportLabReportCard({ labResults, currentUser, onImported }) {
               );
             })}
           </ul>
+          </>
+          )}
 
-          {saveBlockedMessage && <p className="message message-error section">{saveBlockedMessage}</p>}
-
-          {saveSummary && (
-            <p className={`message section ${saveSummary.failed === 0 ? "message-success" : "message-error"}`}>
-              {saveSummary.succeeded} of {saveSummary.total} row(s) saved.
-              {saveSummary.failed > 0 &&
-                ` ${saveSummary.failed} failed and remain in the draft — you can retry saving them.`}
+          {saveBlockedMessage && (
+            <p role="alert" aria-live="assertive" className="message message-error section">
+              {saveBlockedMessage}
             </p>
           )}
 
-          <button
-            type="button"
-            onClick={handleSaveSelected}
-            disabled={saving || drafts.every((d) => !d.selected)}
-            className="btn btn-save section"
-          >
-            {saving ? "Saving..." : "Save Selected Results"}
-          </button>
+          {saveSummary && saveSummary.failed > 0 && (
+            <p role="alert" aria-live="assertive" className="message section message-error">
+              {saveSummary.succeeded} of {saveSummary.total} row(s) saved.{" "}
+              {saveSummary.failed} failed and remain in the draft — you can retry saving them.
+            </p>
+          )}
+
+          {drafts.length > 0 && (
+            <button
+              type="button"
+              onClick={handleSaveSelected}
+              disabled={
+                saving ||
+                drafts.every((d) => !d.selected) ||
+                (likelyDuplicateReport && !duplicateReportAcknowledged)
+              }
+              aria-busy={saving}
+              className="btn btn-save section"
+            >
+              {saving ? "Saving..." : "Save Selected Results"}
+            </button>
+          )}
         </div>
+      )}
+          </>
+        )}
+      </div>
+
+      {saveSummary && saveSummary.failed === 0 && (
+        <>
+          <p role="status" aria-live="polite" className="message section message-success">
+            <span aria-hidden="true">✓</span> {saveSummary.succeeded} test
+            {saveSummary.succeeded === 1 ? "" : "s"} successfully imported and saved.
+          </p>
+          <div className="goal-actions">
+            <button
+              type="button"
+              onClick={() => {
+                resetAll();
+                setImportSectionExpanded(true);
+              }}
+              className="btn btn-chip"
+            >
+              Import Another PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => onViewImportedReport?.(saveSummary.importBatchId)}
+              className="btn btn-save"
+            >
+              View Imported Report
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
 }
 
-export default ImportLabReportCard;
+export default memo(ImportLabReportCard);

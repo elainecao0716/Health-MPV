@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   CartesianGrid,
   Line,
@@ -17,15 +17,34 @@ import AiLabInsightsCard from "./components/AiLabInsightsCard";
 import VisitSummaryCard from "./components/VisitSummaryCard";
 import ImportLabReportCard from "./components/ImportLabReportCard";
 import AuthScreen from "./components/AuthScreen";
+import StatusMessage from "./components/StatusMessage";
+import SectionNav from "./components/SectionNav";
 import {
   findLabPreset,
   getPresetDefaultUnit,
   getPresetRangeForUnit,
 } from "./data/labReferencePresets";
 import { computeLabStatus } from "./utils/labAnalysis";
+import { formatMonthDay, formatFullDate } from "./utils/formatDate";
+import {
+  validateTestDate,
+  validateTestName,
+  validateResultValue,
+  validateReferenceLow,
+  validateReferenceHigh,
+  validateReferenceRangeOrder,
+} from "./utils/labValidation";
+import { groupLabResultsByTestDate } from "./utils/labHistoryGrouping";
+import { getImportedFilenames } from "./utils/importedReportFilenames";
+import { orderTestNamesByPriority } from "./utils/orderTestNamesByPriority";
+import { selectLabTrendSeries } from "./utils/labTrend";
 
 const goalStorageKey = (userId) => `healthMpvGoalWeight_${userId}`;
 const labFavoritesStorageKey = (userId) => `healthMpvLabFavorites_${userId}`;
+const chartTestStorageKey = (userId) => `healthMpvChartTest_${userId}`;
+// Initial visible rows per expanded date group before "Show more" is needed — a single imported
+// report commonly saves 40-50 rows on one date, so this is what actually keeps the list short.
+const LAB_HISTORY_GROUP_CARD_LIMIT = 10;
 
 // Only fills fields that are currently blank — never overwrites what the user typed.
 const computePresetAutoFill = (testName, current) => {
@@ -76,6 +95,7 @@ function App() {
   const [loadingRecords, setLoadingRecords] = useState(true);
   const [listError, setListError] = useState(null);
   const [deleteStatus, setDeleteStatus] = useState(null); // { type: "success" | "error", message: string }
+  const [deletingRecordId, setDeletingRecordId] = useState(null); // guards against a double-click firing two deletes
 
   const [editingId, setEditingId] = useState(null);
   const [editDate, setEditDate] = useState("");
@@ -104,6 +124,7 @@ function App() {
   const [loadingCheckins, setLoadingCheckins] = useState(true);
   const [checkinListError, setCheckinListError] = useState(null);
   const [checkinDeleteStatus, setCheckinDeleteStatus] = useState(null);
+  const [deletingCheckinId, setDeletingCheckinId] = useState(null);
 
   const [editingCheckinId, setEditingCheckinId] = useState(null);
   const [editCheckinDate, setEditCheckinDate] = useState("");
@@ -157,6 +178,22 @@ function App() {
   const [loadingLabResults, setLoadingLabResults] = useState(true);
   const [labListError, setLabListError] = useState(null);
   const [labDeleteStatus, setLabDeleteStatus] = useState(null);
+  const [deletingLabId, setDeletingLabId] = useState(null);
+
+  // Bulk-delete selection — ids only. Every delete call site (per-report card, or the scoped
+  // Select All/None/Delete Selected inside an expanded report) passes an explicit row array, so a
+  // stale id from a since-changed report can never be swept into a delete unintentionally.
+  const [selectedLabIds, setSelectedLabIds] = useState(() => new Set());
+  const [bulkDeletingLabs, setBulkDeletingLabs] = useState(false);
+  const [bulkLabDeleteStatus, setBulkLabDeleteStatus] = useState(null);
+
+  // Lab History disclosure state — collapsed by default at both levels (the whole section, and
+  // each report group within it), since a single imported report can save 40-50 rows. The two
+  // Sets below hold each group's `key` (see groupLabResultsByTestDate) — its import_batch_id, or a
+  // `legacy:<date>` fallback — not a raw test_date, since two reports can share a date.
+  const [labHistoryExpanded, setLabHistoryExpanded] = useState(false);
+  const [expandedDateGroups, setExpandedDateGroups] = useState(() => new Set());
+  const [fullyShownDateGroups, setFullyShownDateGroups] = useState(() => new Set());
 
   const [editingLabId, setEditingLabId] = useState(null);
   const [editLabTestDate, setEditLabTestDate] = useState("");
@@ -179,9 +216,20 @@ function App() {
 
   const [selectedChartTest, setSelectedChartTest] = useState("");
 
+  // Reported up by ImportLabReportCard whenever it has extracted-but-not-yet-saved draft rows,
+  // so sign-out can warn before silently discarding them.
+  const [hasUnsavedPdfDraft, setHasUnsavedPdfDraft] = useState(false);
+
+  // Manual Lab Entry collapses behind a compact "+ Add Lab Result Manually" row by default,
+  // mirroring ImportLabReportCard's own collapsed-by-default toggle.
+  const [manualLabEntryExpanded, setManualLabEntryExpanded] = useState(false);
+
   const currentUser = session?.user ?? null;
 
-  const fetchRecords = async () => {
+  // useCallback so these keep a stable identity across unrelated re-renders (e.g. typing in an
+  // unrelated form field) — that stability is what lets ImportLabReportCard's onImported prop
+  // (and the other card components' props) actually skip a re-render via React.memo below.
+  const fetchRecords = useCallback(async () => {
     if (!currentUser) return;
     setLoadingRecords(true);
     const { data, error } = await supabase
@@ -197,9 +245,9 @@ function App() {
       setRecords(data);
     }
     setLoadingRecords(false);
-  };
+  }, [currentUser]);
 
-  const fetchCheckins = async () => {
+  const fetchCheckins = useCallback(async () => {
     if (!currentUser) return;
     setLoadingCheckins(true);
     const { data, error } = await supabase
@@ -216,9 +264,9 @@ function App() {
       setCheckins(data);
     }
     setLoadingCheckins(false);
-  };
+  }, [currentUser]);
 
-  const fetchLabResults = async () => {
+  const fetchLabResults = useCallback(async () => {
     if (!currentUser) return;
     setLoadingLabResults(true);
     const { data, error } = await supabase
@@ -235,7 +283,7 @@ function App() {
       setLabResults(data);
     }
     setLoadingLabResults(false);
-  };
+  }, [currentUser]);
 
   // Restore any existing session on load, then just keep local state in sync —
   // no async Supabase calls happen inside this callback itself.
@@ -255,7 +303,11 @@ function App() {
   }, []);
 
   // Reacts to the session changing (not the auth callback itself) — this is
-  // where the actual async data fetching / clearing happens.
+  // where the actual async data fetching / clearing happens. Deliberately keyed on
+  // currentUser?.id (a stable primitive) rather than currentUser or the fetch functions
+  // themselves — this must NOT re-run on a token refresh (which creates a new currentUser
+  // object for the same signed-in user) or on every render, only on an actual sign-in/out/switch.
+  /* oxlint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (currentUser) {
       fetchRecords();
@@ -271,9 +323,17 @@ function App() {
       setLoadingRecords(false);
       setLoadingCheckins(false);
       setLoadingLabResults(false);
+      setSelectedLabIds(new Set());
+      setBulkLabDeleteStatus(null);
+      setLabHistoryExpanded(false);
+      setExpandedDateGroups(new Set());
+      setFullyShownDateGroups(new Set());
     }
   }, [currentUser?.id]);
+  /* oxlint-enable react-hooks/exhaustive-deps */
 
+  // Same intentional currentUser?.id keying as above — must not re-run on token refresh.
+  /* oxlint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (!currentUser) {
       setSavedGoal(null);
@@ -316,6 +376,17 @@ function App() {
     }
   }, [currentUser?.id]);
 
+  useEffect(() => {
+    if (!currentUser) {
+      setSelectedChartTest("");
+      return;
+    }
+
+    const stored = localStorage.getItem(chartTestStorageKey(currentUser.id));
+    setSelectedChartTest(stored ?? "");
+  }, [currentUser?.id]);
+  /* oxlint-enable react-hooks/exhaustive-deps */
+
   const handleToggleFavoriteTest = (testName) => {
     if (!currentUser) return;
     const trimmed = testName.trim();
@@ -328,6 +399,11 @@ function App() {
       localStorage.setItem(labFavoritesStorageKey(currentUser.id), JSON.stringify(next));
       return next;
     });
+  };
+
+  const handleChartTestChange = (name) => {
+    setSelectedChartTest(name);
+    if (currentUser) localStorage.setItem(chartTestStorageKey(currentUser.id), name);
   };
 
   const handleSaveGoal = () => {
@@ -422,15 +498,16 @@ function App() {
     setCheckinSaving(false);
   };
 
-  const handleDeleteCheckin = async (id) => {
-    const confirmed = window.confirm("Delete this check-in?");
+  const handleDeleteCheckin = async (checkin) => {
+    const confirmed = window.confirm(`Delete the check-in from ${checkin.checkin_date}? This cannot be undone.`);
     if (!confirmed) return;
 
     setCheckinDeleteStatus(null);
+    setDeletingCheckinId(checkin.id);
     const { error } = await supabase
       .from("daily_checkins")
       .delete()
-      .eq("id", id)
+      .eq("id", checkin.id)
       .eq("user_id", currentUser.id);
 
     if (error) {
@@ -439,6 +516,7 @@ function App() {
       setCheckinDeleteStatus({ type: "success", message: "Deleted!" });
       await fetchCheckins();
     }
+    setDeletingCheckinId(null);
   };
 
   const handleCheckinEditClick = (checkin) => {
@@ -505,28 +583,13 @@ function App() {
     }
   };
 
-  const validateLabResult = (date, testName, resultValue, refLow, refHigh) => {
-    if (!date) return "Test date is required.";
-    if (!testName || !testName.trim()) return "Test name is required.";
-
-    if (resultValue === "" || Number.isNaN(Number(resultValue))) {
-      return "Result must be numeric.";
-    }
-
-    if (refLow !== "" && Number.isNaN(Number(refLow))) {
-      return "Reference low must be numeric.";
-    }
-
-    if (refHigh !== "" && Number.isNaN(Number(refHigh))) {
-      return "Reference high must be numeric.";
-    }
-
-    if (refLow !== "" && refHigh !== "" && Number(refLow) > Number(refHigh)) {
-      return "Reference low cannot be greater than reference high.";
-    }
-
-    return null;
-  };
+  const validateLabResult = (date, testName, resultValue, refLow, refHigh) =>
+    validateTestDate(date) ??
+    validateTestName(testName) ??
+    validateResultValue(resultValue) ??
+    validateReferenceLow(refLow) ??
+    validateReferenceHigh(refHigh) ??
+    validateReferenceRangeOrder(refLow, refHigh);
 
   const applyLabTestNameChange = (value) => {
     setLabTestName(value);
@@ -687,15 +750,18 @@ function App() {
     setLabSaving(false);
   };
 
-  const handleDeleteLabResult = async (id) => {
-    const confirmed = window.confirm("Delete this lab result?");
+  const handleDeleteLabResult = async (lab) => {
+    const confirmed = window.confirm(
+      `Delete the ${lab.test_name} result from ${lab.test_date}? This cannot be undone.`
+    );
     if (!confirmed) return;
 
     setLabDeleteStatus(null);
+    setDeletingLabId(lab.id);
     const { error } = await supabase
       .from("lab_results")
       .delete()
-      .eq("id", id)
+      .eq("id", lab.id)
       .eq("user_id", currentUser.id);
 
     if (error) {
@@ -704,6 +770,7 @@ function App() {
       setLabDeleteStatus({ type: "success", message: "Deleted!" });
       await fetchLabResults();
     }
+    setDeletingLabId(null);
   };
 
   const handleLabEditClick = (lab) => {
@@ -816,15 +883,16 @@ function App() {
     setSaving(false);
   };
 
-  const handleDelete = async (id) => {
-    const confirmed = window.confirm("Delete this record?");
+  const handleDelete = async (record) => {
+    const confirmed = window.confirm(`Delete the record from ${record.record_date}? This cannot be undone.`);
     if (!confirmed) return;
 
     setDeleteStatus(null);
+    setDeletingRecordId(record.id);
     const { error } = await supabase
       .from("health_records")
       .delete()
-      .eq("id", id)
+      .eq("id", record.id)
       .eq("user_id", currentUser.id);
 
     if (error) {
@@ -833,6 +901,7 @@ function App() {
       setDeleteStatus({ type: "success", message: "Deleted!" });
       await fetchRecords();
     }
+    setDeletingRecordId(null);
   };
 
   const handleEditClick = (record) => {
@@ -885,10 +954,6 @@ function App() {
     (a, b) => new Date(a.record_date) - new Date(b.record_date)
   );
 
-  const formatMonthDay = (dateStr) => {
-    const [, month, day] = dateStr.split("-");
-    return `${month}/${day}`;
-  };
 
   const weights = records
     .map((r) => r.weight)
@@ -938,8 +1003,23 @@ function App() {
   const latestCheckin = checkins[0];
 
   const distinctLabTestNames = [...new Set(labResults.map((l) => l.test_name))].sort();
+  // Common/quick-pick tests first, so the Lab Trend selector doesn't bury them alphabetically
+  // among less-frequently-tracked results.
+  const chartTestOptions = orderTestNamesByPriority(QUICK_TEST_NAMES, distinctLabTestNames);
 
-  const filteredLabResults = labResults.filter((lab) => {
+  const totalLabResults = labResults.length;
+  // Unfiltered — report cards always show a report's complete row set, and the summary stats
+  // describe the whole saved history, regardless of the active filters. labResults is already
+  // sorted newest-first (fetchLabResults' Supabase query), so index 0 is always the latest report.
+  const allLabHistoryGroups = groupLabResultsByTestDate(labResults);
+  const totalLabReportGroups = allLabHistoryGroups.length;
+  const latestLabReportGroup = allLabHistoryGroups[0] ?? null;
+
+  // Filter & Search stays hidden — and inert — until there's enough history to need it, so a
+  // leftover filter value can never silently narrow the library while its own controls are gone.
+  const filtersVisible = totalLabReportGroups >= 3 || totalLabResults > 100;
+
+  const labResultMatchesFilters = (lab) => {
     if (labFilterTestName && lab.test_name !== labFilterTestName) return false;
     if (labFilterCategory && lab.category !== labFilterCategory) return false;
     if (labFilterStartDate && lab.test_date < labFilterStartDate) return false;
@@ -954,34 +1034,170 @@ function App() {
     }
 
     return true;
-  });
+  };
 
-  const totalLabResults = labResults.length;
+  // Report-level filtering — a report card shows if any of its rows match, but once shown it
+  // always displays its complete row set. Cards represent a whole imported report, never a
+  // partial slice of one.
+  const labHistoryGroups = !filtersVisible
+    ? allLabHistoryGroups
+    : allLabHistoryGroups.filter((group) => group.rows.some(labResultMatchesFilters));
+
+  // Fallback only — group.sourceFilename (lab_results.source_filename) is the source of truth.
+  // This client-side-only memory (see src/utils/importedReportFilenames.js) only matters for rows
+  // saved before that column existed, and only on the browser/device they were imported on.
+  const importedFilenames = getImportedFilenames(currentUser?.id);
+
+  const BULK_LAB_DELETE_CONFIRM_THRESHOLD = 10;
+
+  const handleToggleLabSelect = (id) => {
+    setSelectedLabIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleSelectRowsInGroup = (rows) => {
+    setSelectedLabIds((prev) => {
+      const next = new Set(prev);
+      rows.forEach((r) => next.add(r.id));
+      return next;
+    });
+  };
+
+  const handleDeselectRowsInGroup = (rows) => {
+    setSelectedLabIds((prev) => {
+      const next = new Set(prev);
+      rows.forEach((r) => next.delete(r.id));
+      return next;
+    });
+  };
+
+  const handleBulkDeleteLabResults = async (rowsToDelete) => {
+    const toDelete = rowsToDelete;
+    if (toDelete.length === 0) {
+      setBulkLabDeleteStatus({ type: "error", message: "Select at least one row to delete." });
+      return;
+    }
+
+    const dates = toDelete.map((lab) => lab.test_date).sort();
+    const dateRangeText = dates[0] === dates[dates.length - 1] ? dates[0] : `${dates[0]} to ${dates[dates.length - 1]}`;
+
+    const confirmed = window.confirm(
+      `Delete ${toDelete.length} lab result(s) dated ${dateRangeText}? This cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    if (toDelete.length > BULK_LAB_DELETE_CONFIRM_THRESHOLD) {
+      const typed = window.prompt(
+        `You are about to permanently delete ${toDelete.length} lab results (${dateRangeText}). ` +
+          `This is a large batch and cannot be undone. Type DELETE to confirm.`
+      );
+      if (typed !== "DELETE") {
+        setBulkLabDeleteStatus({ type: "error", message: "Bulk delete cancelled — confirmation text did not match." });
+        return;
+      }
+    }
+
+    setBulkLabDeleteStatus(null);
+    setBulkDeletingLabs(true);
+
+    // Controlled, sequential, one delete per row — mirrors the same per-row outcome pattern used
+    // for bulk-saving PDF import rows, so a partial failure is knowable per row rather than
+    // all-or-nothing. Nothing is removed from `labResults` here; the visible list only ever
+    // changes once fetchLabResults() re-reads the confirmed state from Supabase below.
+    const outcomes = [];
+    for (const lab of toDelete) {
+      const { error } = await supabase
+        .from("lab_results")
+        .delete()
+        .eq("id", lab.id)
+        .eq("user_id", currentUser.id);
+      outcomes.push({ id: lab.id, lab, ok: !error, error: error?.message ?? null });
+    }
+
+    const succeeded = outcomes.filter((o) => o.ok);
+    const failed = outcomes.filter((o) => !o.ok);
+
+    // Keep only the rows that failed selected, so a retry only targets what's still there.
+    setSelectedLabIds(new Set(failed.map((o) => o.id)));
+
+    if (failed.length === 0) {
+      setBulkLabDeleteStatus({
+        type: "success",
+        message: `${succeeded.length} of ${outcomes.length} lab result(s) deleted.`,
+      });
+    } else {
+      const failedDetails = failed
+        .map((o) => `${o.lab.test_name} (${o.lab.test_date}): ${o.error}`)
+        .join("; ");
+      setBulkLabDeleteStatus({
+        type: "error",
+        message:
+          `${succeeded.length} of ${outcomes.length} deleted. ${failed.length} failed and remain in your ` +
+          `results, still selected so you can retry — ${failedDetails}`,
+      });
+    }
+
+    setBulkDeletingLabs(false);
+
+    if (succeeded.length > 0) {
+      await fetchLabResults();
+    }
+  };
+
+  // Keyed by each report group's `key` (its import_batch_id, or a `legacy:<date>` fallback for
+  // rows saved before that column existed) — not test_date, since two reports can share a date.
+  const toggleDateGroupExpanded = (groupKey) => {
+    setExpandedDateGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  };
+
+  const toggleDateGroupShowAll = (groupKey) => {
+    setFullyShownDateGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupKey)) next.delete(groupKey);
+      else next.add(groupKey);
+      return next;
+    });
+  };
+
+  // "View Imported Report" from ImportLabReportCard — open Lab History, expand the just-imported
+  // report's own group (by its import_batch_id), then scroll it into view once React has rendered
+  // the expanded content.
+  const handleViewImportedReport = (importBatchId) => {
+    setLabHistoryExpanded(true);
+    if (importBatchId) {
+      setExpandedDateGroups((prev) => new Set(prev).add(importBatchId));
+    }
+    requestAnimationFrame(() => {
+      document.getElementById("lab-history-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  };
+
   const latestLabResult = labResults[0];
   const outOfRangeLabCount = labResults.filter(
     (l) => l.status === "Low" || l.status === "High"
   ).length;
   const labTestsTracked = distinctLabTestNames.length;
 
-  // Only chart entries that share the most recent unit for this test, per
-  // "do not combine tests with different units in the same chart."
+  // Only chart entries that are unit-compatible for this test — see selectLabTrendSeries for what
+  // "compatible" means (same unit once case/whitespace-normalized, or one side just has no unit
+  // recorded). Genuinely different units (mg/dL vs mmol/L) are still never combined.
   const chartTestEntries = labResults.filter((l) => l.test_name === selectedChartTest);
-  const chartUnit = chartTestEntries[0]?.unit ?? null;
-  const chartMatchingUnitEntries = chartTestEntries.filter((l) => (l.unit ?? null) === chartUnit);
-  const chartDataPoints = [...chartMatchingUnitEntries].sort(
-    (a, b) => new Date(a.test_date) - new Date(b.test_date)
-  );
-  const chartReferenceLow = chartMatchingUnitEntries.find(
-    (l) => typeof l.reference_low === "number"
-  )?.reference_low ?? null;
-  const chartReferenceHigh = chartMatchingUnitEntries.find(
-    (l) => typeof l.reference_high === "number"
-  )?.reference_high ?? null;
+  const {
+    unit: chartUnit,
+    dataPoints: chartDataPoints,
+    referenceLow: chartReferenceLow,
+    referenceHigh: chartReferenceHigh,
+  } = selectLabTrendSeries(chartTestEntries);
 
-  const formatLabDate = (dateStr) => {
-    const [, month, day] = dateStr.split("-");
-    return `${month}/${day}`;
-  };
 
   const labStatusClass = (labStatusValue) => {
     if (labStatusValue === "Low") return "lab-status lab-status-low";
@@ -991,6 +1207,14 @@ function App() {
   };
 
   const handleSignOut = async () => {
+    if (hasUnsavedPdfDraft) {
+      const confirmed = window.confirm(
+        "You have an unsaved PDF import draft. Signing out now will discard it — it is never saved to your " +
+          "account until you click \"Save Selected Results\". Sign out anyway?"
+      );
+      if (!confirmed) return;
+    }
+
     const { error } = await supabase.auth.signOut();
     if (error) {
       console.error("[App] sign out failed:", error.message);
@@ -1022,10 +1246,14 @@ function App() {
           </button>
         </div>
 
-        <header className="dashboard-header">
-          <h1 className="dashboard-title">❤️ Health MPV Dashboard</h1>
+        <header id="section-overview" className="dashboard-header">
+          <h1 className="dashboard-title">
+            <span aria-hidden="true">❤️</span> Health MPV Dashboard
+          </h1>
           <p className="dashboard-subtitle">Track your health records and progress.</p>
         </header>
+
+        <SectionNav />
 
         <div className="summary-cards">
           <div className="summary-card">
@@ -1082,8 +1310,10 @@ function App() {
           </div>
         </div>
 
-        <div className="card">
-          <h2 className="heading-records">🎯 Goal Weight</h2>
+        <div id="section-goal" className="card">
+          <h2 className="heading-records">
+            <span aria-hidden="true">🎯</span> Goal Weight
+          </h2>
           <label className="field">
             Goal Weight (lbs)
             <input
@@ -1109,7 +1339,11 @@ function App() {
             </button>
           </div>
 
-          {goalError && <p className="message message-error">{goalError}</p>}
+          {goalError && (
+            <p role="alert" aria-live="assertive" className="message message-error">
+              {goalError}
+            </p>
+          )}
 
           {savedGoal === null ? (
             <p className="empty-text section">Enter and save a goal weight to track progress.</p>
@@ -1193,8 +1427,10 @@ function App() {
           </div>
         </div>
 
-        <div className="card">
-          <h2 className="heading-records">☀️ Daily Check-In</h2>
+        <div id="section-checkin" className="card">
+          <h2 className="heading-records">
+            <span aria-hidden="true">☀️</span> Daily Check-In
+          </h2>
 
           <form onSubmit={handleSaveCheckin} className="form section" noValidate>
             <label className="field">
@@ -1245,7 +1481,7 @@ function App() {
               />
             </label>
 
-            <div className="field">
+            <div className="field" role="group" aria-label="Mood">
               Mood
               <div className="mood-options">
                 {MOOD_OPTIONS.map((option) => (
@@ -1253,6 +1489,7 @@ function App() {
                     key={option}
                     type="button"
                     onClick={() => setMood(mood === option ? "" : option)}
+                    aria-pressed={mood === option}
                     className={`btn btn-mood ${mood === option ? "btn-mood-selected" : ""}`}
                   >
                     {option}
@@ -1276,40 +1513,19 @@ function App() {
             </button>
           </form>
 
-          {checkinStatus && (
-            <p
-              className={`message ${
-                checkinStatus.type === "success" ? "message-success" : "message-error"
-              }`}
-            >
-              {checkinStatus.message}
-            </p>
-          )}
+          <StatusMessage status={checkinStatus} />
 
           <div className="section">
             <h3 className="heading-records">Recent Check-Ins</h3>
 
-            {checkinListError && <p className="message message-error">{checkinListError}</p>}
-
-            {checkinDeleteStatus && (
-              <p
-                className={`message ${
-                  checkinDeleteStatus.type === "success" ? "message-success" : "message-error"
-                }`}
-              >
-                {checkinDeleteStatus.message}
+            {checkinListError && (
+              <p role="alert" aria-live="assertive" className="message message-error">
+                {checkinListError}
               </p>
             )}
 
-            {checkinUpdateStatus && (
-              <p
-                className={`message ${
-                  checkinUpdateStatus.type === "success" ? "message-success" : "message-error"
-                }`}
-              >
-                {checkinUpdateStatus.message}
-              </p>
-            )}
+            <StatusMessage status={checkinDeleteStatus} />
+            <StatusMessage status={checkinUpdateStatus} />
 
             {!checkinListError && !loadingCheckins && checkins.length === 0 && (
               <p className="empty-text">No check-ins yet.</p>
@@ -1364,7 +1580,7 @@ function App() {
                             className="input"
                           />
                         </label>
-                        <div className="field">
+                        <div className="field" role="group" aria-label="Mood">
                           Mood
                           <div className="mood-options">
                             {MOOD_OPTIONS.map((option) => (
@@ -1374,6 +1590,7 @@ function App() {
                                 onClick={() =>
                                   setEditMood(editMood === option ? "" : option)
                                 }
+                                aria-pressed={editMood === option}
                                 className={`btn btn-mood ${
                                   editMood === option ? "btn-mood-selected" : ""
                                 }`}
@@ -1441,10 +1658,12 @@ function App() {
                             Edit
                           </button>
                           <button
-                            onClick={() => handleDeleteCheckin(checkin.id)}
+                            onClick={() => handleDeleteCheckin(checkin)}
+                            disabled={deletingCheckinId === checkin.id}
+                            aria-busy={deletingCheckinId === checkin.id}
                             className="btn btn-delete"
                           >
-                            Delete
+                            {deletingCheckinId === checkin.id ? "Deleting..." : "Delete"}
                           </button>
                         </div>
                       </>
@@ -1479,12 +1698,36 @@ function App() {
           </div>
         </div>
 
-        <div className="card">
-          <h2 className="heading-records">🩸 Lab Results</h2>
+        <div id="section-lab-results" className="card">
+          <h2 className="heading-records">
+            <span aria-hidden="true">🩸</span> Lab Results
+          </h2>
           <p className="hint-text">
             Status is a simple comparison against the reference range you enter — not a diagnosis.
           </p>
 
+          <button
+            type="button"
+            onClick={() => setManualLabEntryExpanded((prev) => !prev)}
+            aria-expanded={manualLabEntryExpanded}
+            aria-controls="manual-lab-entry-content"
+            className="import-section-toggle heading-records"
+          >
+            {manualLabEntryExpanded ? (
+              <>
+                Manual Lab Entry{" "}
+                <span aria-hidden="true" className="import-section-caret">
+                  ▼
+                </span>
+              </>
+            ) : (
+              "+ Add Lab Result Manually"
+            )}
+          </button>
+
+          <div id="manual-lab-entry-content">
+          {manualLabEntryExpanded && (
+          <>
           <form onSubmit={handleSaveLabResult} className="form section" noValidate>
             <label className="field">
               Test Date
@@ -1496,20 +1739,23 @@ function App() {
               />
             </label>
 
-            <div className="field">
+            <div className="field" role="group" aria-label="Test name">
               Test Name
               {favoriteTestNames.length > 0 && (
                 <>
-                  <span className="hint-text">⭐ Favorites</span>
+                  <span className="hint-text">
+                    <span aria-hidden="true">⭐</span> Favorites
+                  </span>
                   <div className="chip-options">
                     {favoriteTestNames.map((name) => (
                       <button
                         key={name}
                         type="button"
                         onClick={() => applyLabTestNameChange(name)}
+                        aria-pressed={labTestName === name}
                         className={`btn btn-chip ${labTestName === name ? "btn-chip-selected" : ""}`}
                       >
-                        ⭐ {name}
+                        <span aria-hidden="true">⭐</span> {name}
                       </button>
                     ))}
                   </div>
@@ -1521,6 +1767,7 @@ function App() {
                     key={name}
                     type="button"
                     onClick={() => applyLabTestNameChange(name)}
+                    aria-pressed={labTestName === name}
                     className={`btn btn-chip ${labTestName === name ? "btn-chip-selected" : ""}`}
                   >
                     {name}
@@ -1533,15 +1780,18 @@ function App() {
                   value={labTestName}
                   onChange={(e) => applyLabTestNameChange(e.target.value)}
                   placeholder="Or type a custom test name"
+                  aria-label="Custom test name"
                   className="input"
                 />
                 <button
                   type="button"
                   onClick={() => handleToggleFavoriteTest(labTestName)}
                   disabled={labTestName.trim() === ""}
+                  aria-pressed={favoriteTestNames.includes(labTestName.trim())}
                   className="btn btn-cancel"
                 >
-                  {favoriteTestNames.includes(labTestName.trim()) ? "★ Favorited" : "☆ Favorite"}
+                  <span aria-hidden="true">{favoriteTestNames.includes(labTestName.trim()) ? "★" : "☆"}</span>{" "}
+                  {favoriteTestNames.includes(labTestName.trim()) ? "Favorited" : "Favorite"}
                 </button>
               </div>
             </div>
@@ -1650,16 +1900,22 @@ function App() {
             </button>
           </form>
 
-          {labStatus && (
-            <p
-              className={`message ${
-                labStatus.type === "success" ? "message-success" : "message-error"
-              }`}
-            >
-              {labStatus.message}
-            </p>
+          <StatusMessage status={labStatus} />
+          </>
           )}
+          </div>
 
+          <div id="section-import">
+            <ImportLabReportCard
+              labResults={labResults}
+              currentUser={currentUser}
+              onImported={fetchLabResults}
+              onDraftStateChange={setHasUnsavedPdfDraft}
+              onViewImportedReport={handleViewImportedReport}
+            />
+          </div>
+
+          {filtersVisible && (
           <div className="section">
             <h3 className="heading-records">Filter & Search</h3>
             <div className="lab-filters">
@@ -1727,18 +1983,21 @@ function App() {
               </label>
             </div>
           </div>
+          )}
 
           <div className="section">
-            <h3 className="heading-records">📈 Lab Trend</h3>
+            <h3 className="heading-records">
+              <span aria-hidden="true">📈</span> Lab Trend
+            </h3>
             <label className="field">
               Test
               <select
                 value={selectedChartTest}
-                onChange={(e) => setSelectedChartTest(e.target.value)}
+                onChange={(e) => handleChartTestChange(e.target.value)}
                 className="input"
               >
                 <option value="">Choose a test</option>
-                {distinctLabTestNames.map((name) => (
+                {chartTestOptions.map((name) => (
                   <option key={name} value={name}>
                     {name}
                   </option>
@@ -1763,34 +2022,34 @@ function App() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e6eaf0" />
                     <XAxis
                       dataKey="test_date"
-                      tickFormatter={formatLabDate}
+                      tickFormatter={formatMonthDay}
                       tick={{ fontSize: 12 }}
                     />
                     <YAxis domain={["auto", "auto"]} tick={{ fontSize: 12 }} />
                     <Tooltip
                       formatter={(value) => [value, selectedChartTest]}
-                      labelFormatter={formatLabDate}
+                      labelFormatter={formatMonthDay}
                     />
                     {chartReferenceLow !== null && (
                       <ReferenceLine
                         y={chartReferenceLow}
-                        stroke="#e0453c"
+                        stroke="#c53b33"
                         strokeDasharray="4 4"
-                        label={{ value: "Low", fontSize: 11, fill: "#e0453c" }}
+                        label={{ value: "Low", fontSize: 11, fill: "#c53b33" }}
                       />
                     )}
                     {chartReferenceHigh !== null && (
                       <ReferenceLine
                         y={chartReferenceHigh}
-                        stroke="#e0453c"
+                        stroke="#c53b33"
                         strokeDasharray="4 4"
-                        label={{ value: "High", fontSize: 11, fill: "#e0453c" }}
+                        label={{ value: "High", fontSize: 11, fill: "#c53b33" }}
                       />
                     )}
                     <Line
                       type="monotone"
                       dataKey="result_value"
-                      stroke="#2f6feb"
+                      stroke="#2a63d1"
                       strokeWidth={2}
                       dot={{ r: 3 }}
                       activeDot={{ r: 5 }}
@@ -1801,30 +2060,40 @@ function App() {
             )}
           </div>
 
-          <div className="section">
-            <h3 className="heading-records">Lab History</h3>
-
-            {labListError && <p className="message message-error">{labListError}</p>}
-
-            {labDeleteStatus && (
-              <p
-                className={`message ${
-                  labDeleteStatus.type === "success" ? "message-success" : "message-error"
-                }`}
+          <div id="lab-history-section" className="section">
+            <div className="import-draft-header">
+              <h3 className="heading-records">Report Library</h3>
+              <button
+                type="button"
+                onClick={() => setLabHistoryExpanded((prev) => !prev)}
+                aria-expanded={labHistoryExpanded}
+                aria-controls="lab-history-content"
+                className="btn btn-chip"
               >
-                {labDeleteStatus.message}
+                {labHistoryExpanded ? "Hide Reports" : "View Reports"}
+              </button>
+            </div>
+            <div className="lab-history-summary">
+              <span className="hint-text">Reports: {totalLabReportGroups}</span>
+              <span className="hint-text">Tests: {totalLabResults}</span>
+              <span className="hint-text">
+                Latest Report Date: {latestLabReportGroup ? formatFullDate(latestLabReportGroup.testDate) : "--"}
+              </span>
+              <span className="hint-text">
+                Latest Laboratory:{" "}
+                {latestLabReportGroup ? latestLabReportGroup.labName ?? "Unknown laboratory" : "--"}
+              </span>
+            </div>
+
+            {labListError && (
+              <p role="alert" aria-live="assertive" className="message message-error">
+                {labListError}
               </p>
             )}
 
-            {labUpdateStatus && (
-              <p
-                className={`message ${
-                  labUpdateStatus.type === "success" ? "message-success" : "message-error"
-                }`}
-              >
-                {labUpdateStatus.message}
-              </p>
-            )}
+            <StatusMessage status={labDeleteStatus} />
+            <StatusMessage status={labUpdateStatus} />
+            <StatusMessage status={bulkLabDeleteStatus} />
 
             {!labListError && !loadingLabResults && labResults.length === 0 && (
               <p className="empty-text">No lab results yet.</p>
@@ -1832,14 +2101,101 @@ function App() {
 
             {!labListError &&
               labResults.length > 0 &&
-              filteredLabResults.length === 0 && (
-                <p className="empty-text">No lab results match your filters.</p>
+              labHistoryGroups.length === 0 && (
+                <p className="empty-text">No reports match your filters.</p>
               )}
 
-            {!labListError && filteredLabResults.length > 0 && (
-              <ul className="records-list">
-                {filteredLabResults.map((lab) => (
+            <div id="lab-history-content">
+              {labHistoryExpanded && !labListError && labHistoryGroups.length > 0 && (
+              <>
+                <ul className="records-list">
+                {labHistoryGroups.map(({ key, testDate, rows, labName, sourceFilename }) => {
+                  const groupExpanded = expandedDateGroups.has(key);
+                  const showAll = fullyShownDateGroups.has(key);
+                  const visibleRows = showAll ? rows : rows.slice(0, LAB_HISTORY_GROUP_CARD_LIMIT);
+                  const formattedDate = formatFullDate(testDate);
+                  const selectedInGroup = rows.filter((r) => selectedLabIds.has(r.id));
+                  return (
+                  <li key={key} className="record-card lab-history-group">
+                    <div className="import-draft-header">
+                      <span className="hint-text">
+                        <strong>File:</strong>{" "}
+                        {sourceFilename ?? importedFilenames[testDate] ?? "Unknown filename"}
+                      </span>
+                      <span className="hint-text">
+                        <strong>Laboratory:</strong> {labName ?? "Unknown laboratory"}
+                      </span>
+                      <span className="hint-text">
+                        <strong>Report date:</strong> {formattedDate}
+                      </span>
+                      <span className="hint-text">
+                        {rows.length} test{rows.length === 1 ? "" : "s"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleDateGroupExpanded(key)}
+                        aria-expanded={groupExpanded}
+                        aria-controls={`lab-history-group-${key}`}
+                        aria-label={`${groupExpanded ? "Hide" : "View"} report from ${formattedDate}`}
+                        className="btn btn-chip"
+                      >
+                        {groupExpanded ? "Hide" : "View"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleBulkDeleteLabResults(rows)}
+                        disabled={bulkDeletingLabs}
+                        aria-busy={bulkDeletingLabs}
+                        className="btn btn-delete"
+                      >
+                        {bulkDeletingLabs ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+
+                    <div id={`lab-history-group-${key}`}>
+                      {groupExpanded && (
+                        <>
+                          <div className="goal-actions">
+                            <button
+                              type="button"
+                              onClick={() => handleSelectRowsInGroup(rows)}
+                              className="btn btn-chip"
+                            >
+                              Select All
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeselectRowsInGroup(rows)}
+                              className="btn btn-chip"
+                            >
+                              Select None
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleBulkDeleteLabResults(selectedInGroup)}
+                              disabled={bulkDeletingLabs || selectedInGroup.length === 0}
+                              aria-busy={bulkDeletingLabs}
+                              className="btn btn-delete"
+                            >
+                              {bulkDeletingLabs
+                                ? "Deleting..."
+                                : `Delete Selected${selectedInGroup.length > 0 ? ` (${selectedInGroup.length})` : ""}`}
+                            </button>
+                          </div>
+                          <ul className="records-list">
+                          {visibleRows.map((lab) => (
                   <li key={lab.id} className="record-card">
+                    <div className="import-draft-header">
+                      <label className="import-draft-select">
+                        <input
+                          type="checkbox"
+                          checked={selectedLabIds.has(lab.id)}
+                          onChange={() => handleToggleLabSelect(lab.id)}
+                          aria-label={`Select ${lab.test_name} from ${lab.test_date}`}
+                        />
+                        Select
+                      </label>
+                    </div>
                     {editingLabId === lab.id ? (
                       <div className="form">
                         <label className="field">
@@ -1852,22 +2208,25 @@ function App() {
                           />
                         </label>
 
-                        <div className="field">
+                        <div className="field" role="group" aria-label="Test name">
                           Test Name
                           {favoriteTestNames.length > 0 && (
                             <>
-                              <span className="hint-text">⭐ Favorites</span>
+                              <span className="hint-text">
+                                <span aria-hidden="true">⭐</span> Favorites
+                              </span>
                               <div className="chip-options">
                                 {favoriteTestNames.map((name) => (
                                   <button
                                     key={name}
                                     type="button"
                                     onClick={() => applyEditLabTestNameChange(name)}
+                                    aria-pressed={editLabTestName === name}
                                     className={`btn btn-chip ${
                                       editLabTestName === name ? "btn-chip-selected" : ""
                                     }`}
                                   >
-                                    ⭐ {name}
+                                    <span aria-hidden="true">⭐</span> {name}
                                   </button>
                                 ))}
                               </div>
@@ -1879,6 +2238,7 @@ function App() {
                                 key={name}
                                 type="button"
                                 onClick={() => applyEditLabTestNameChange(name)}
+                                aria-pressed={editLabTestName === name}
                                 className={`btn btn-chip ${
                                   editLabTestName === name ? "btn-chip-selected" : ""
                                 }`}
@@ -1892,17 +2252,20 @@ function App() {
                               type="text"
                               value={editLabTestName}
                               onChange={(e) => applyEditLabTestNameChange(e.target.value)}
+                              aria-label="Custom test name"
                               className="input"
                             />
                             <button
                               type="button"
                               onClick={() => handleToggleFavoriteTest(editLabTestName)}
                               disabled={editLabTestName.trim() === ""}
+                              aria-pressed={favoriteTestNames.includes(editLabTestName.trim())}
                               className="btn btn-cancel"
                             >
-                              {favoriteTestNames.includes(editLabTestName.trim())
-                                ? "★ Favorited"
-                                : "☆ Favorite"}
+                              <span aria-hidden="true">
+                                {favoriteTestNames.includes(editLabTestName.trim()) ? "★" : "☆"}
+                              </span>{" "}
+                              {favoriteTestNames.includes(editLabTestName.trim()) ? "Favorited" : "Favorite"}
                             </button>
                           </div>
                         </div>
@@ -2070,52 +2433,76 @@ function App() {
                             Edit
                           </button>
                           <button
-                            onClick={() => handleDeleteLabResult(lab.id)}
+                            onClick={() => handleDeleteLabResult(lab)}
+                            disabled={deletingLabId === lab.id}
+                            aria-busy={deletingLabId === lab.id}
                             className="btn btn-delete"
                           >
-                            Delete
+                            {deletingLabId === lab.id ? "Deleting..." : "Delete"}
                           </button>
                         </div>
                       </>
                     )}
                   </li>
-                ))}
-              </ul>
-            )}
+                          ))}
+                          </ul>
+                          {rows.length > LAB_HISTORY_GROUP_CARD_LIMIT && (
+                            <button
+                              type="button"
+                              onClick={() => toggleDateGroupShowAll(key)}
+                              className="btn btn-chip"
+                            >
+                              {showAll ? "Show less" : `Show more (${rows.length - LAB_HISTORY_GROUP_CARD_LIMIT} more)`}
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </li>
+                  );
+                })}
+                </ul>
+              </>
+              )}
+            </div>
           </div>
         </div>
 
-        <ImportLabReportCard
-          labResults={labResults}
-          currentUser={currentUser}
-          onImported={fetchLabResults}
-        />
+        <div id="section-lab-insights">
+          <AiLabInsightsCard labResults={labResults} />
+        </div>
 
-        <AiLabInsightsCard labResults={labResults} />
+        <div id="section-ai-coach">
+          <AiCoachCard
+            records={records}
+            goalWeight={savedGoal}
+            checkins={checkins}
+            labResults={labResults}
+          />
+        </div>
 
-        <AiCoachCard
-          records={records}
-          goalWeight={savedGoal}
-          checkins={checkins}
-          labResults={labResults}
-        />
+        <div id="section-ai-chat">
+          <AiChatCard
+            records={records}
+            goalWeight={savedGoal}
+            checkins={checkins}
+            labResults={labResults}
+          />
+        </div>
 
-        <AiChatCard
-          records={records}
-          goalWeight={savedGoal}
-          checkins={checkins}
-          labResults={labResults}
-        />
+        <div id="section-visit-summary">
+          <VisitSummaryCard
+            records={records}
+            checkins={checkins}
+            labResults={labResults}
+            savedGoal={savedGoal}
+          />
+        </div>
 
-        <VisitSummaryCard
-          records={records}
-          checkins={checkins}
-          labResults={labResults}
-          savedGoal={savedGoal}
-        />
-
-        <div className="card">
-          <h2 className="heading-records">📈 Weight Trend</h2>
+        <div id="section-weight" className="card">
+          <h2 className="heading-records">
+            <span aria-hidden="true">📈</span> Weight Trend
+          </h2>
 
           {chartData.length < 2 ? (
             <p className="empty-text">Add at least 2 records to see your weight trend.</p>
@@ -2137,7 +2524,7 @@ function App() {
                   <Line
                     type="monotone"
                     dataKey="weight"
-                    stroke="#2f6feb"
+                    stroke="#2a63d1"
                     strokeWidth={2}
                     dot={{ r: 3 }}
                     activeDot={{ r: 5 }}
@@ -2190,29 +2577,20 @@ function App() {
             </button>
           </form>
 
-          {status && (
-            <p className={`message ${status.type === "success" ? "message-success" : "message-error"}`}>
-              {status.message}
-            </p>
-          )}
+          <StatusMessage status={status} />
         </div>
 
         <div className="card">
           <h2 className="heading-records">Health Records</h2>
 
-          {listError && <p className="message message-error">{listError}</p>}
-
-          {deleteStatus && (
-            <p className={`message ${deleteStatus.type === "success" ? "message-success" : "message-error"}`}>
-              {deleteStatus.message}
+          {listError && (
+            <p role="alert" aria-live="assertive" className="message message-error">
+              {listError}
             </p>
           )}
 
-          {updateStatus && (
-            <p className={`message ${updateStatus.type === "success" ? "message-success" : "message-error"}`}>
-              {updateStatus.message}
-            </p>
-          )}
+          <StatusMessage status={deleteStatus} />
+          <StatusMessage status={updateStatus} />
 
           {!listError && !loadingRecords && records.length === 0 && (
             <p className="empty-text">No records yet.</p>
@@ -2270,8 +2648,13 @@ function App() {
                         <button onClick={() => handleEditClick(record)} className="btn btn-edit">
                           Edit
                         </button>
-                        <button onClick={() => handleDelete(record.id)} className="btn btn-delete">
-                          Delete
+                        <button
+                          onClick={() => handleDelete(record)}
+                          disabled={deletingRecordId === record.id}
+                          aria-busy={deletingRecordId === record.id}
+                          className="btn btn-delete"
+                        >
+                          {deletingRecordId === record.id ? "Deleting..." : "Delete"}
                         </button>
                       </div>
                     </>

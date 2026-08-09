@@ -4,6 +4,18 @@ import { computeTrendsWithHistory, latestResultPerTest } from "./labAnalysis";
 
 const RECENT_CHECKINS_COUNT = 5;
 
+// Every date shown in the summary goes through this so the whole document reads consistently,
+// rather than mixing raw "2024-01-05" strings with any other format.
+export const formatFriendlyDate = (dateStr) => {
+  if (!dateStr) return dateStr;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(dateStr);
+  if (!match) return dateStr;
+  const [, year, month, day] = match;
+  const date = new Date(Number(year), Number(month) - 1, Number(day));
+  if (Number.isNaN(date.getTime())) return dateStr;
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+};
+
 const mostRecentWithWeight = (recordsDescByDate) =>
   recordsDescByDate.find((r) => typeof r.weight === "number") ?? null;
 
@@ -24,9 +36,9 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
     sections.push({
       title: "Weight Summary",
       lines: [
-        `Latest weight: ${latestWeighed.weight} lbs on ${latestWeighed.record_date}`,
+        `Latest weight: ${latestWeighed.weight} lbs on ${formatFriendlyDate(latestWeighed.record_date)}`,
         startWeighed && startWeighed.record_date !== latestWeighed.record_date
-          ? `Starting weight: ${startWeighed.weight} lbs on ${startWeighed.record_date}`
+          ? `Starting weight: ${startWeighed.weight} lbs on ${formatFriendlyDate(startWeighed.record_date)}`
           : null,
         `Average weight: ${average.toFixed(1)} lbs`,
         `Highest recorded: ${Math.max(...weights)} lbs`,
@@ -73,7 +85,7 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
     sections.push({
       title: "Recent Daily Check-Ins",
       lines: recent.map((c) => {
-        const parts = [c.checkin_date];
+        const parts = [formatFriendlyDate(c.checkin_date)];
         if (typeof c.sleep_hours === "number") parts.push(`Sleep ${c.sleep_hours} hrs`);
         if (typeof c.water_cups === "number") parts.push(`Water ${c.water_cups} cups`);
         if (typeof c.exercise_minutes === "number") parts.push(`Exercise ${c.exercise_minutes} min`);
@@ -92,7 +104,7 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
           l.reference_low !== null && l.reference_high !== null
             ? ` (saved range ${l.reference_low}-${l.reference_high}${l.unit ? ` ${l.unit}` : ""})`
             : "";
-        return `${l.test_name}: ${l.result_value}${l.unit ? ` ${l.unit}` : ""}${range} — ${l.status} on ${l.test_date}`;
+        return `${l.test_name}: ${l.result_value}${l.unit ? ` ${l.unit}` : ""}${range} — ${l.status} on ${formatFriendlyDate(l.test_date)}`;
       }),
     });
 
@@ -107,7 +119,7 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
             l.reference_low !== null && l.reference_high !== null
               ? `${l.reference_low}-${l.reference_high}${l.unit ? ` ${l.unit}` : ""}`
               : "not saved";
-          return `${l.test_name}: ${l.result_value}${l.unit ? ` ${l.unit}` : ""} — ${l.status} (saved range ${range}) on ${l.test_date}`;
+          return `${l.test_name}: ${l.result_value}${l.unit ? ` ${l.unit}` : ""} — ${l.status} (saved range ${range}) on ${formatFriendlyDate(l.test_date)}`;
         }),
       });
     }
@@ -124,8 +136,8 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
               : `${t.direction} by ${Math.abs(t.absoluteChange)}${unitLabel}` +
                 (t.percentChange !== null ? ` (${t.percentChange > 0 ? "+" : ""}${t.percentChange}%)` : "");
           return (
-            `${t.testName}: ${t.previous.result_value}${unitLabel} on ${t.previous.test_date} → ` +
-            `${t.latest.result_value}${unitLabel} on ${t.latest.test_date} (${changeText})`
+            `${t.testName}: ${t.previous.result_value}${unitLabel} on ${formatFriendlyDate(t.previous.test_date)} → ` +
+            `${t.latest.result_value}${unitLabel} on ${formatFriendlyDate(t.latest.test_date)} (${changeText})`
           );
         }),
       });
@@ -137,17 +149,17 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
   const noteLines = [];
   for (const r of records) {
     if (r.notes && r.notes.trim()) {
-      noteLines.push(`User note — health record (${r.record_date}): "${r.notes.trim()}"`);
+      noteLines.push(`User note — health record (${formatFriendlyDate(r.record_date)}): "${r.notes.trim()}"`);
     }
   }
   for (const c of checkins) {
     if (c.notes && c.notes.trim()) {
-      noteLines.push(`User note — check-in (${c.checkin_date}): "${c.notes.trim()}"`);
+      noteLines.push(`User note — check-in (${formatFriendlyDate(c.checkin_date)}): "${c.notes.trim()}"`);
     }
   }
   for (const l of labResults) {
     if (l.notes && l.notes.trim()) {
-      noteLines.push(`User note — ${l.test_name} lab result (${l.test_date}): "${l.notes.trim()}"`);
+      noteLines.push(`User note — ${l.test_name} lab result (${formatFriendlyDate(l.test_date)}): "${l.notes.trim()}"`);
     }
   }
   if (noteLines.length > 0) {
@@ -160,7 +172,7 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
   for (const l of outOfRangeForQuestions.slice(0, 5)) {
     questions.push(
       `What might explain the ${l.test_name} result of ${l.result_value}${l.unit ? ` ${l.unit}` : ""} ` +
-        `(${l.status}) from ${l.test_date}?`
+        `(${l.status}) from ${formatFriendlyDate(l.test_date)}?`
     );
   }
   if (savedGoal !== null) {
@@ -183,7 +195,7 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
 };
 
 export const visitSummaryToPlainText = (sections, generatedAtLabel) => {
-  const lines = [`Visit Summary — Generated ${generatedAtLabel}`, ""];
+  const lines = [`Health MPV — Visit Summary`, `Generated ${generatedAtLabel}`, ""];
   for (const section of sections) {
     lines.push(section.title);
     lines.push("-".repeat(section.title.length));
