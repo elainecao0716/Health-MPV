@@ -5,7 +5,9 @@ import {
   buildDraftRow,
   parseReportMetadata,
   detectKnownLabName,
+  parseOcrResponse,
 } from "./labPdfExtraction.js";
+import { computeLabStatus } from "../src/utils/labAnalysis.js";
 
 const page = (pageNumber, lines) => [{ pageNumber, lines }];
 
@@ -259,5 +261,67 @@ describe("buildDraftRow — one-sided reference ranges", () => {
       reportMeta
     );
     expect(draft.rangeSource).toBeNull();
+  });
+});
+
+// Real-world case: a Sun Clinical Laboratories A1C row prints its actual lab reference range
+// (4.8-5.6%) directly beside the result, and separately prints an ADA interpretive guidance block
+// below it ("PREDIABETES: 5.7-6.4", "DIABETES: >6.4") — the OCR model initially reported the
+// interpretive band as if it were the reference range. parseOcrResponse itself never chooses
+// between these (that's the vision model's job, guided by OCR_SYSTEM_PROMPT) — it only shapes
+// whatever the model returns, so these tests prove that shaping is correct and unaffected either
+// way, and document the exact bug this fixes.
+describe("parseOcrResponse — reference range vs. interpretive guidance text", () => {
+  it("keeps the lab's actual reference range and preserved interpretive text as notes, not as reference_low/reference_high", () => {
+    const rawText = JSON.stringify({
+      report_date: null,
+      lab_name: "Sun Clinical Laboratories",
+      results: [
+        {
+          test_name: "GLYCOHEMOGLOBIN(HGB A1C)",
+          result_value: 5.8,
+          unit: "%",
+          reference_low: 4.8,
+          reference_high: 5.6,
+          flag: "H",
+          test_date: null,
+          lab_name: null,
+          notes: "Prediabetes: 5.7-6.4; Diabetes: >6.4",
+          confidence: "High",
+        },
+      ],
+    });
+    const { results } = parseOcrResponse(rawText);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      rawLabel: "GLYCOHEMOGLOBIN(HGB A1C)",
+      resultValue: 5.8,
+      unit: "%",
+      referenceLow: 4.8,
+      referenceHigh: 5.6,
+      extractedFlag: "High",
+      notes: "Prediabetes: 5.7-6.4; Diabetes: >6.4",
+    });
+  });
+
+  it("computes High against the real range, and would wrongly compute In Range against the interpretive band — documents the exact bug this fixes", () => {
+    expect(computeLabStatus(5.8, 4.8, 5.6)).toBe("High");
+    expect(computeLabStatus(5.8, 5.7, 6.4)).toBe("In Range");
+  });
+
+  it("passes through currently-correct single-sided reference ranges unchanged (HDL >49, LDL <100, eGFR >=90)", () => {
+    const rawText = JSON.stringify({
+      report_date: null,
+      lab_name: null,
+      results: [
+        { test_name: "HDL CHOLESTEROL", result_value: 95, unit: "MG/DL", reference_low: 49, reference_high: null, flag: null, test_date: null, lab_name: null, notes: null, confidence: "High" },
+        { test_name: "LDL-DIRECT", result_value: 154, unit: "MG/DL", reference_low: null, reference_high: 100, flag: "H", test_date: null, lab_name: null, notes: null, confidence: "High" },
+        { test_name: "eGFR(MDRD)", result_value: 85, unit: "ML/MIN", reference_low: 90, reference_high: null, flag: "L", test_date: null, lab_name: null, notes: null, confidence: "High" },
+      ],
+    });
+    const { results } = parseOcrResponse(rawText);
+    expect(results[0]).toMatchObject({ rawLabel: "HDL CHOLESTEROL", referenceLow: 49, referenceHigh: null });
+    expect(results[1]).toMatchObject({ rawLabel: "LDL-DIRECT", referenceLow: null, referenceHigh: 100 });
+    expect(results[2]).toMatchObject({ rawLabel: "eGFR(MDRD)", referenceLow: 90, referenceHigh: null });
   });
 });

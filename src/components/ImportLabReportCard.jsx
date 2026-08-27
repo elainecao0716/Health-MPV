@@ -1,7 +1,14 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { computeLabStatus } from "../utils/labAnalysis";
 import { supabase } from "../supabase";
-import { validateDraftRow, findDuplicate } from "../utils/labDraftHelpers";
+import {
+  validateDraftRow,
+  findDuplicate,
+  flagStatusMismatch,
+  computeDraftStatus,
+  isMismatchAccepted,
+  isBlockedByMismatch,
+} from "../utils/labDraftHelpers";
 import { rememberImportedFilename } from "../utils/importedReportFilenames";
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
@@ -33,6 +40,18 @@ const draftFromServerRow = (row) => ({
   confidence: row.confidence,
   ocrDerived: row.ocrDerived,
   sourcePage: row.sourcePage,
+  // Audit trail — captured once, here, and never touched again by any edit handler, so what the
+  // AI originally read stays visible even after the user corrects a field.
+  originalExtraction: {
+    resultValue: typeof row.resultValue === "number" ? String(row.resultValue) : "",
+    unit: row.unit ?? "",
+    referenceLow: typeof row.referenceLow === "number" ? String(row.referenceLow) : "",
+    referenceHigh: typeof row.referenceHigh === "number" ? String(row.referenceHigh) : "",
+    extractedFlag: row.extractedFlag,
+  },
+  // Set only by the explicit "Accept After Review" action — never automatically. See
+  // isMismatchAccepted/isBlockedByMismatch in labDraftHelpers for how this is used.
+  mismatchAcceptedSnapshot: null,
 });
 
 function ImportLabReportCard({ labResults, currentUser, onImported, onDraftStateChange, onViewImportedReport }) {
@@ -309,6 +328,21 @@ function ImportLabReportCard({ labResults, currentUser, onImported, onDraftState
     if (invalidRows.length > 0) {
       setSaveBlockedMessage(
         `Fix the validation errors on ${invalidRows.length} selected row(s) before saving — nothing has been saved yet.`
+      );
+      return;
+    }
+
+    // Required-review model: a row whose extracted flag contradicts its computed status can never
+    // go through this normal save action until it's either edited to resolve the contradiction or
+    // explicitly accepted via "Accept After Review" — belt-and-suspenders alongside the disabled
+    // Save button below.
+    const blockedRows = selectedRows.filter((d) => isBlockedByMismatch(d));
+    if (blockedRows.length > 0) {
+      const names = blockedRows.map((d) => d.testName || d.originalLabel).join(", ");
+      setSaveBlockedMessage(
+        `${blockedRows.length} selected row(s) need review before saving — the report's flag doesn't ` +
+          `match the status calculated from the extracted reference range: ${names}. Resolve the ` +
+          `contradiction or use "Accept After Review" on each row before saving.`
       );
       return;
     }
@@ -606,12 +640,20 @@ function ImportLabReportCard({ labResults, currentUser, onImported, onDraftState
               const errors = validateDraftRow(draft);
               const duplicate = findDuplicate(draft, labResults);
               const showDuplicateWarning = duplicate && !dismissedDuplicateIds.has(draft.id);
-              const resultNum = Number(draft.resultValue);
-              const refLowNum = draft.referenceLow === "" ? null : Number(draft.referenceLow);
-              const refHighNum = draft.referenceHigh === "" ? null : Number(draft.referenceHigh);
-              const calculatedStatus = Number.isNaN(resultNum)
-                ? "--"
-                : computeLabStatus(resultNum, refLowNum, refHighNum);
+              const calculatedStatus = computeDraftStatus(draft);
+              // Never corrects resultValue/referenceLow/referenceHigh/extractedFlag — required-review
+              // model: an unresolved, unaccepted mismatch blocks this row from the normal save action
+              // (see isBlockedByMismatch below and the Save button's disabled condition).
+              const hasMismatch = flagStatusMismatch(draft.extractedFlag, calculatedStatus);
+              const mismatchAccepted = isMismatchAccepted(draft);
+              const rowBlockedByMismatch = hasMismatch && !mismatchAccepted;
+              const extractionChanged =
+                draft.originalExtraction &&
+                (draft.originalExtraction.resultValue !== draft.resultValue ||
+                  draft.originalExtraction.unit !== draft.unit ||
+                  draft.originalExtraction.referenceLow !== draft.referenceLow ||
+                  draft.originalExtraction.referenceHigh !== draft.referenceHigh ||
+                  draft.originalExtraction.extractedFlag !== draft.extractedFlag);
 
               return (
                 <li key={draft.id} className="record-card import-draft-row">
@@ -743,15 +785,83 @@ function ImportLabReportCard({ labResults, currentUser, onImported, onDraftState
                         className="input"
                       />
                     </label>
+
+                    <label className="field">
+                      Extracted flag
+                      <select
+                        value={draft.extractedFlag ?? ""}
+                        onChange={(e) =>
+                          updateDraft(draft.id, { extractedFlag: e.target.value === "" ? null : e.target.value })
+                        }
+                        className="input"
+                      >
+                        <option value="">No flag</option>
+                        <option value="High">High</option>
+                        <option value="Low">Low</option>
+                        <option value="Abnormal">Abnormal</option>
+                        <option value="Critical">Critical</option>
+                      </select>
+                    </label>
                   </div>
 
                   <div className="record-row">
-                    <strong>Extracted flag:</strong> {draft.extractedFlag ?? "--"} &nbsp;•&nbsp;
                     <strong>Calculated app status:</strong>{" "}
                     <span className={`lab-status lab-status-${calculatedStatus.toLowerCase().replace(/\s+/g, "-")}`}>
                       {calculatedStatus}
                     </span>
                   </div>
+
+                  {rowBlockedByMismatch && (
+                    <div className="message message-error import-duplicate-warning">
+                      <div>
+                        <strong>Needs Review — Possible Extraction Mismatch:</strong> the report's flag
+                        doesn't match the status computed from the extracted reference range. Edit the
+                        result, unit, reference range, or flag above to resolve it, or accept it below if
+                        the source report really does contain these values.
+                      </div>
+                      {extractionChanged && (
+                        <p className="hint-text">
+                          Originally extracted: {draft.originalExtraction.resultValue || "--"}
+                          {draft.originalExtraction.unit ? ` ${draft.originalExtraction.unit}` : ""}
+                          {(draft.originalExtraction.referenceLow || draft.originalExtraction.referenceHigh) &&
+                            ` (range ${draft.originalExtraction.referenceLow || "?"}-${
+                              draft.originalExtraction.referenceHigh || "?"
+                            })`}
+                          {draft.originalExtraction.extractedFlag
+                            ? `, flag ${draft.originalExtraction.extractedFlag}`
+                            : ""}
+                        </p>
+                      )}
+                      <div className="goal-actions">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateDraft(draft.id, {
+                              mismatchAcceptedSnapshot: {
+                                resultValue: draft.resultValue,
+                                unit: draft.unit,
+                                referenceLow: draft.referenceLow,
+                                referenceHigh: draft.referenceHigh,
+                                extractedFlag: draft.extractedFlag,
+                              },
+                            })
+                          }
+                          className="btn btn-chip"
+                        >
+                          Accept After Review
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {hasMismatch && mismatchAccepted && (
+                    <div className="message message-success import-duplicate-warning">
+                      <div>
+                        Accepted after review — the report's flag and extracted range still disagree,
+                        but you've confirmed this reflects the source report.
+                      </div>
+                    </div>
+                  )}
 
                   <div className="record-row">
                     {draft.rangeSource === "extracted" && (
@@ -827,7 +937,8 @@ function ImportLabReportCard({ labResults, currentUser, onImported, onDraftState
               disabled={
                 saving ||
                 drafts.every((d) => !d.selected) ||
-                (likelyDuplicateReport && !duplicateReportAcknowledged)
+                (likelyDuplicateReport && !duplicateReportAcknowledged) ||
+                drafts.some((d) => d.selected && isBlockedByMismatch(d))
               }
               aria-busy={saving}
               className="btn btn-save section"

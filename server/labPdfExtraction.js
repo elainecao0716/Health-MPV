@@ -383,6 +383,27 @@ const OCR_SYSTEM_PROMPT =
   "is usually followed by a flag letter (H/L/A/C). Read each row strictly left-to-right — test name, then " +
   "whichever sub-column holds its value, then reference range, then units — and take care not to let a " +
   "value shift up or down to a neighboring test name. " +
+  "KEY RULE for reference ranges: when a report has a dedicated column labeled \"Reference Range\", " +
+  "\"Reference Interval\", \"Normal Range\", or equivalent, the value physically associated with a test " +
+  "row in THAT column always takes precedence over any interpretive range, diagnostic category, " +
+  "clinical guideline, treatment target, or explanatory text printed below or near the result — even if " +
+  "that other text is closer to the result, more prominent, or itself shaped like a number-to-number " +
+  "range. This applies generally, to any test on any report, not just one specific test — reports " +
+  "commonly print this kind of secondary guidance for things like A1C (prediabetes/diabetes categories), " +
+  "cholesterol/LDL/HDL (NCEP desirable/borderline/high-risk categories), coronary risk ratios, and many " +
+  "other panels. Worked example — given a row that looks like this:\n" +
+  "  TEST: GLYCOHEMOGLOBIN (HGB A1C)\n" +
+  "  RESULT: 5.8 H\n" +
+  "  REFERENCE RANGE: 4.8-5.6 %\n" +
+  "  Additional text: PREDIABETES: 5.7-6.4  DIABETES: >6.4  GLYCEMIC CONTROL FOR DIABETIC ADULT: <7.0\n" +
+  "the required extraction is result_value: 5.8, unit: \"%\", reference_low: 4.8, reference_high: 5.6, " +
+  "flag: \"H\" — the numbers 5.7-6.4, >6.4, and <7.0 are interpretive/diagnostic guidance and MUST NOT " +
+  "replace the laboratory reference range shown in the Reference Range column. If this kind of " +
+  "interpretive text is present for a row, copy it briefly into that row's 'notes' field instead, so " +
+  "it's preserved for human review without being mistaken for the lab's own reference range. Extract the " +
+  "H/L/A/C abnormal flag printed adjacent to the result independently of reference-range extraction — a " +
+  "flag you can clearly read should always be reported even on a row where the reference range itself is " +
+  "ambiguous or where interpretive guidance text is also present. " +
   "Include EVERY test row on the page, in the same top-to-bottom order as printed, even if its result is " +
   "non-numeric text (e.g. NEGATIVE, POSITIVE, YELLOW, CLEAR, TRACE) — for those, set result_value to null " +
   "and put the literal text reading in notes. Do not skip or merge rows: skipping a row is a common mistake " +
@@ -417,7 +438,8 @@ const OCR_SYSTEM_PROMPT =
 
 // Returns { results, reportDate, labName } — reportDate/labName are the header-level values the
 // model found once for the whole page, independent of any per-row test_date/lab_name.
-const parseOcrResponse = (rawText) => {
+// Exported for direct unit testing.
+export const parseOcrResponse = (rawText) => {
   let parsed;
   try {
     parsed = JSON.parse(rawText);
