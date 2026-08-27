@@ -227,4 +227,62 @@ describe("required-review model — isMismatchAccepted / isBlockedByMismatch", (
     expect(flagCorrected.referenceHigh).toBe(before.referenceHigh);
     expect(isBlockedByMismatch(flagCorrected)).toBe(false);
   });
+
+  // Full High/Low truth table, agreed with the user — each test uses concrete draft numbers (range
+  // 70-99) rather than the abstract flagStatusMismatch(flag, status) calls already covered above,
+  // so these exercise the same isBlockedByMismatch/computeDraftStatus pipeline the app actually uses.
+  it("scenario 1: extracted High, calculated High — allowed", () => {
+    const d = draft({ resultValue: "150", referenceLow: "70", referenceHigh: "99", extractedFlag: "High" });
+    expect(computeDraftStatus(d)).toBe("High");
+    expect(isBlockedByMismatch(d)).toBe(false);
+  });
+
+  it("scenario 2a: No flag, calculated High — allowed (absence of a flag is never a contradiction)", () => {
+    const d = draft({ resultValue: "150", referenceLow: "70", referenceHigh: "99", extractedFlag: null });
+    expect(computeDraftStatus(d)).toBe("High");
+    expect(isBlockedByMismatch(d)).toBe(false);
+  });
+
+  it("scenario 2b: No flag, calculated Low — allowed (absence of a flag is never a contradiction)", () => {
+    const d = draft({ resultValue: "50", referenceLow: "70", referenceHigh: "99", extractedFlag: null });
+    expect(computeDraftStatus(d)).toBe("Low");
+    expect(isBlockedByMismatch(d)).toBe(false);
+  });
+
+  it("scenario 3 (revised): calculated High, extracted Low — blocked", () => {
+    const d = draft({ resultValue: "150", referenceLow: "70", referenceHigh: "99", extractedFlag: "Low" });
+    expect(computeDraftStatus(d)).toBe("High");
+    expect(isBlockedByMismatch(d)).toBe(true);
+  });
+
+  it("scenario 4: extracted High, calculated In Range — blocked", () => {
+    const d = draft({ resultValue: "95", referenceLow: "70", referenceHigh: "99", extractedFlag: "High" });
+    expect(computeDraftStatus(d)).toBe("In Range");
+    expect(isBlockedByMismatch(d)).toBe(true);
+  });
+
+  it("scenario 5: extracted Low, calculated Low — allowed", () => {
+    const d = draft({ resultValue: "50", referenceLow: "70", referenceHigh: "99", extractedFlag: "Low" });
+    expect(computeDraftStatus(d)).toBe("Low");
+    expect(isBlockedByMismatch(d)).toBe(false);
+  });
+
+  it("scenario 6: extracted Low, calculated In Range — blocked", () => {
+    const d = draft({ resultValue: "95", referenceLow: "70", referenceHigh: "99", extractedFlag: "Low" });
+    expect(computeDraftStatus(d)).toBe("In Range");
+    expect(isBlockedByMismatch(d)).toBe(true);
+  });
+
+  it("scenario 7: extracted High, calculated Low — blocked (opposite-direction pairing, mirrors scenario 3)", () => {
+    const d = draft({ resultValue: "50", referenceLow: "70", referenceHigh: "99", extractedFlag: "High" });
+    expect(computeDraftStatus(d)).toBe("Low");
+    expect(isBlockedByMismatch(d)).toBe(true);
+  });
+
+  it("Abnormal/Critical flags are never treated as a directional contradiction, regardless of computed status — confirms existing behavior is unchanged by this test work", () => {
+    const abnormalHigh = draft({ resultValue: "150", referenceLow: "70", referenceHigh: "99", extractedFlag: "Abnormal" });
+    const criticalLow = draft({ resultValue: "50", referenceLow: "70", referenceHigh: "99", extractedFlag: "Critical" });
+    expect(isBlockedByMismatch(abnormalHigh)).toBe(false);
+    expect(isBlockedByMismatch(criticalLow)).toBe(false);
+  });
 });
