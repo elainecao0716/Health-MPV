@@ -202,9 +202,15 @@ const PAGE_FOOTER_PATTERN = /\d+\s*\/\s*\d+\s+\d{1,2}\/\d{1,2}\/\d{2,4}\s*$/;
 // "GLUCOSE 123 H" on the next line.
 const REFERENCE_RANGE_LINE_PATTERN = /^reference\s+range\b\s*:?\s*(.*)$/i;
 
-// Matches lines shaped like: "Platelets   105  K/uL   150-450   L"
+// Matches lines shaped like: "Platelets   105  K/uL   150-450   L", and also a one-sided inline
+// range like "eGFR(MDRD)   85   ML/MIN   >90" or "CREATININE, URINE   0.9   mg/dL   <1.2" — the
+// range group tries a two-number low-high pair first (unchanged), then a "<"/"<="-prefixed
+// high-only bound, then a ">"/">="-prefixed low-only bound. These three alternatives can never
+// ambiguously overlap: only the first can start with a digit, only the second can start with "<",
+// only the third can start with ">", so there's no risk of the same backtracking ambiguity that
+// caused the trailing-flag bug.
 const RESULT_LINE_PATTERN =
-  /^([A-Za-z][A-Za-z0-9 /\-.,()]{1,45}?)\s{1,}(-?\d+(?:\.\d+)?)\s*([A-Za-z%µ/^0-9]{0,15})?\s*(?:[([]?\s*(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)\s*[)\]]?)?\s*(HIGH|LOW|ABNORMAL|CRITICAL|H|L|A|C)?\s*$/i;
+  /^([A-Za-z][A-Za-z0-9 /\-.,()]{1,45}?)\s{1,}(-?\d+(?:\.\d+)?)\s*([A-Za-z%µ/^0-9]{0,15})?\s*(?:[([]?\s*(-?\d+(?:\.\d+)?)\s*[-–]\s*(-?\d+(?:\.\d+)?)\s*[)\]]?|<=?\s*(-?\d+(?:\.\d+)?)|>=?\s*(-?\d+(?:\.\d+)?))?\s*(HIGH|LOW|ABNORMAL|CRITICAL|H|L|A|C)?\s*$/i;
 
 // A trailing abnormal-flag token on its own at the end of a result line (e.g. "GLUCOSE 123 H",
 // where the unit/range already came from a preceding "Reference Range:" line and nothing else
@@ -287,7 +293,7 @@ export const parseLabResultLines = (pagesText) => {
         continue;
       }
 
-      const [, rawLabel, valueStr, unitRaw, lowStr, highStr, flagRaw] = match;
+      const [, rawLabel, valueStr, unitRaw, lowStr, highStr, ineqHighStr, ineqLowStr, flagRaw] = match;
       const label = rawLabel.trim();
       const appliedRange = pendingRange;
       pendingRange = null;
@@ -296,15 +302,21 @@ export const parseLabResultLines = (pagesText) => {
       const resultValue = Number(valueStr);
       if (!Number.isFinite(resultValue)) continue;
 
-      const hasOwnRange = lowStr !== undefined && highStr !== undefined;
+      // Own range on this line beats an inherited one from a preceding "Reference Range:" line —
+      // same precedence as before, now also true for a one-sided inline bound (ineqHighStr/ineqLowStr).
+      const hasOwnRange =
+        (lowStr !== undefined && highStr !== undefined) || ineqHighStr !== undefined || ineqLowStr !== undefined;
+      const ownReferenceLow = lowStr !== undefined ? Number(lowStr) : ineqLowStr !== undefined ? Number(ineqLowStr) : null;
+      const ownReferenceHigh =
+        highStr !== undefined ? Number(highStr) : ineqHighStr !== undefined ? Number(ineqHighStr) : null;
 
       candidates.push({
         pageNumber,
         rawLabel: label,
         resultValue,
         unit: unitRaw ? unitRaw.trim() : appliedRange?.unit ?? null,
-        referenceLow: hasOwnRange ? Number(lowStr) : appliedRange?.referenceLow ?? null,
-        referenceHigh: hasOwnRange ? Number(highStr) : appliedRange?.referenceHigh ?? null,
+        referenceLow: hasOwnRange ? ownReferenceLow : appliedRange?.referenceLow ?? null,
+        referenceHigh: hasOwnRange ? ownReferenceHigh : appliedRange?.referenceHigh ?? null,
         extractedFlag: peeledFlag ?? (flagRaw ? FLAG_LABELS[flagRaw.toUpperCase()] ?? null : null),
       });
     }

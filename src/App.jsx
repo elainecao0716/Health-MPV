@@ -38,6 +38,7 @@ import { groupLabResultsByTestDate } from "./utils/labHistoryGrouping";
 import { getImportedFilenames } from "./utils/importedReportFilenames";
 import { orderTestNamesByPriority } from "./utils/orderTestNamesByPriority";
 import { selectLabTrendSeries } from "./utils/labTrend";
+import { formatReferenceRange } from "./utils/formatReferenceRange";
 
 const goalStorageKey = (userId) => `healthMpvGoalWeight_${userId}`;
 const labFavoritesStorageKey = (userId) => `healthMpvLabFavorites_${userId}`;
@@ -2393,11 +2394,7 @@ function App() {
                         </div>
                         <div className="record-row">
                           <strong>Reference Range:</strong>{" "}
-                          {lab.reference_low !== null && lab.reference_high !== null
-                            ? `${lab.reference_low} - ${lab.reference_high}${
-                                lab.unit ? ` ${lab.unit}` : ""
-                              }`
-                            : "--"}
+                          {formatReferenceRange(lab.reference_low, lab.reference_high, lab.unit) ?? "--"}
                           {isLabResultCustomRange(lab) && (
                             <span className="lab-custom-badge">Custom range</span>
                           )}

@@ -10,6 +10,7 @@ import {
   isBlockedByMismatch,
 } from "../utils/labDraftHelpers";
 import { rememberImportedFilename } from "../utils/importedReportFilenames";
+import { formatReferenceRange } from "../utils/formatReferenceRange";
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
 const LAB_CATEGORIES = ["CBC", "Metabolic", "Vitamins", "Lipids", "Thyroid", "Glucose", "Iron", "Other"];
@@ -903,9 +904,10 @@ function ImportLabReportCard({ labResults, currentUser, onImported, onDraftState
                         <p className="hint-text">
                           Existing result: {duplicate.result_value}
                           {duplicate.unit ? ` ${duplicate.unit}` : ""} on {duplicate.test_date}
-                          {duplicate.reference_low !== null && duplicate.reference_high !== null
-                            ? ` (saved range ${duplicate.reference_low}-${duplicate.reference_high})`
-                            : ""}
+                          {(() => {
+                            const range = formatReferenceRange(duplicate.reference_low, duplicate.reference_high, null);
+                            return range ? ` (saved range ${range})` : "";
+                          })()}
                         </p>
                       )}
                     </div>

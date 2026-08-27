@@ -325,3 +325,99 @@ describe("parseOcrResponse — reference range vs. interpretive guidance text", 
     expect(results[2]).toMatchObject({ rawLabel: "eGFR(MDRD)", referenceLow: 90, referenceHigh: null });
   });
 });
+
+describe("parseLabResultLines — inline one-sided reference ranges (<, <=, >, >=)", () => {
+  it('parses an inline "<" high-only bound: "CREATININE, URINE 0.9 mg/dL <1.2"', () => {
+    const candidates = parseLabResultLines(page(1, ["CREATININE, URINE 0.9 mg/dL <1.2"]));
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "CREATININE, URINE",
+        resultValue: 0.9,
+        unit: "mg/dL",
+        referenceLow: null,
+        referenceHigh: 1.2,
+      }),
+    ]);
+  });
+
+  it('parses an inline "<=" high-only bound: "SGOT (AST) 21 U/L <=37"', () => {
+    const candidates = parseLabResultLines(page(1, ["SGOT (AST) 21 U/L <=37"]));
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "SGOT (AST)",
+        resultValue: 21,
+        unit: "U/L",
+        referenceLow: null,
+        referenceHigh: 37,
+      }),
+    ]);
+  });
+
+  it('parses an inline ">" low-only bound: "eGFR(MDRD) 85 ML/MIN >90"', () => {
+    const candidates = parseLabResultLines(page(1, ["eGFR(MDRD) 85 ML/MIN >90"]));
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "eGFR(MDRD)",
+        resultValue: 85,
+        unit: "ML/MIN",
+        referenceLow: 90,
+        referenceHigh: null,
+      }),
+    ]);
+  });
+
+  it('parses an inline ">=" low-only bound: "HDL CHOLESTEROL 95 MG/DL >=49"', () => {
+    const candidates = parseLabResultLines(page(1, ["HDL CHOLESTEROL 95 MG/DL >=49"]));
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "HDL CHOLESTEROL",
+        resultValue: 95,
+        unit: "MG/DL",
+        referenceLow: 49,
+        referenceHigh: null,
+      }),
+    ]);
+  });
+
+  it("still parses an inline two-sided range and a trailing flag correctly (no regression)", () => {
+    const candidates = parseLabResultLines(page(1, ["Platelets   105  K/uL   150-450   L"]));
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "Platelets",
+        resultValue: 105,
+        unit: "K/uL",
+        referenceLow: 150,
+        referenceHigh: 450,
+        extractedFlag: "Low",
+      }),
+    ]);
+  });
+
+  it("an inline one-sided bound combined with a trailing flag on the same line still parses both correctly", () => {
+    const candidates = parseLabResultLines(page(1, ["LDL-DIRECT 154 MG/DL <100 H"]));
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "LDL-DIRECT",
+        resultValue: 154,
+        unit: "MG/DL",
+        referenceLow: null,
+        referenceHigh: 100,
+        extractedFlag: "High",
+      }),
+    ]);
+  });
+
+  it("an inline one-sided bound overrides a preceding Reference Range line's range, same precedence as a two-sided inline bound", () => {
+    const candidates = parseLabResultLines(
+      page(1, ["Reference Range: 1-999 mg/dL", "SOMETEST 5 mg/dL <10"])
+    );
+    expect(candidates).toEqual([
+      expect.objectContaining({
+        rawLabel: "SOMETEST",
+        resultValue: 5,
+        referenceLow: null,
+        referenceHigh: 10,
+      }),
+    ]);
+  });
+});

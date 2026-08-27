@@ -1,6 +1,7 @@
 // Builds a physician-friendly Visit Summary entirely from already-fetched, user-scoped data.
 // Purely deterministic — no AI call, nothing invented, nothing beyond what's in the records.
 import { computeTrendsWithHistory, latestResultPerTest } from "./labAnalysis";
+import { formatReferenceRange } from "./formatReferenceRange";
 
 const RECENT_CHECKINS_COUNT = 5;
 
@@ -100,10 +101,8 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
     sections.push({
       title: "Latest Lab Results",
       lines: latestPerTest.map((l) => {
-        const range =
-          l.reference_low !== null && l.reference_high !== null
-            ? ` (saved range ${l.reference_low}-${l.reference_high}${l.unit ? ` ${l.unit}` : ""})`
-            : "";
+        const formattedRange = formatReferenceRange(l.reference_low, l.reference_high, l.unit);
+        const range = formattedRange ? ` (saved range ${formattedRange})` : "";
         return `${l.test_name}: ${l.result_value}${l.unit ? ` ${l.unit}` : ""}${range} — ${l.status} on ${formatFriendlyDate(l.test_date)}`;
       }),
     });
@@ -115,10 +114,7 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
       sections.push({
         title: "Out-of-Range Lab Results",
         lines: outOfRange.map((l) => {
-          const range =
-            l.reference_low !== null && l.reference_high !== null
-              ? `${l.reference_low}-${l.reference_high}${l.unit ? ` ${l.unit}` : ""}`
-              : "not saved";
+          const range = formatReferenceRange(l.reference_low, l.reference_high, l.unit) ?? "not saved";
           return `${l.test_name}: ${l.result_value}${l.unit ? ` ${l.unit}` : ""} — ${l.status} (saved range ${range}) on ${formatFriendlyDate(l.test_date)}`;
         }),
       });
