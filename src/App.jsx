@@ -35,6 +35,7 @@ import {
   validateReferenceRangeOrder,
 } from "./utils/labValidation";
 import { groupLabResultsByTestDate } from "./utils/labHistoryGrouping";
+import { updateSelectionAfterDelete } from "./utils/labSelection";
 import { getImportedFilenames } from "./utils/importedReportFilenames";
 import { orderTestNamesByPriority } from "./utils/orderTestNamesByPriority";
 import { selectLabTrendSeries } from "./utils/labTrend";
@@ -1128,8 +1129,15 @@ function App() {
     const succeeded = outcomes.filter((o) => o.ok);
     const failed = outcomes.filter((o) => !o.ok);
 
-    // Keep only the rows that failed selected, so a retry only targets what's still there.
-    setSelectedLabIds(new Set(failed.map((o) => o.id)));
+    // Only touch ids from this delete attempt — a succeeded id is dropped from the selection, a
+    // failed one stays selected for retry, and any other report's selections are left untouched.
+    setSelectedLabIds((prev) =>
+      updateSelectionAfterDelete(
+        prev,
+        succeeded.map((o) => o.id),
+        failed.map((o) => o.id)
+      )
+    );
 
     if (failed.length === 0) {
       setBulkLabDeleteStatus({
