@@ -85,7 +85,11 @@ function VisitSummaryCard({ records, checkins, labResults, savedGoal }) {
             <div
               key={section.title}
               className={`visit-summary-section ${
-                section.title === "User-Entered Notes" ? "visit-summary-section-notes" : ""
+                section.title === "User-Entered Notes"
+                  ? "visit-summary-section-notes"
+                  : section.title === "Out-of-Range Lab Results"
+                    ? "visit-summary-section-out-of-range"
+                    : ""
               }`}
             >
               <h4 className="visit-summary-section-title">

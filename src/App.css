@@ -868,6 +868,22 @@ h4.heading-records,
   padding-left: var(--space-3);
 }
 
+/* Out-of-range lab results get the same reserved-for-real-problems red used elsewhere in the
+   app (see --color-danger above), on screen and in print alike, so they stand out from the
+   rest of the summary at a glance. */
+.visit-summary-section-out-of-range .visit-summary-section-title {
+  color: var(--color-danger);
+  font-weight: var(--weight-bold);
+}
+
+.visit-summary-section-out-of-range .visit-summary-list {
+  color: var(--color-danger);
+}
+
+.visit-summary-section-out-of-range .visit-summary-list li::marker {
+  color: var(--color-danger);
+}
+
 .visit-summary-section-title {
   font-size: var(--text-md);
   font-weight: var(--weight-bold);
