@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import MarkdownMessage from "./MarkdownMessage";
 
 const STARTER_QUESTIONS = [
   "Summarize my progress",
@@ -114,7 +115,7 @@ function AiChatCard({ records, goalWeight, checkins, labResults }) {
               message.role === "user" ? "chat-bubble-user" : "chat-bubble-assistant"
             }`}
           >
-            {message.content}
+            {message.role === "assistant" ? <MarkdownMessage text={message.content} /> : message.content}
           </div>
         ))}
 
