@@ -36,7 +36,8 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
         <span aria-hidden="true">🤖</span> AI Health Coach
       </h2>
       <p className="hint-text">
-        Get personalized, AI-generated insights based on your logged health records.
+        Get personalized, AI-generated insights based on your logged health records, daily
+        check-ins, and lab results.
       </p>
 
       <button
