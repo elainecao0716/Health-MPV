@@ -23,6 +23,15 @@ const mostRecentWithWeight = (recordsDescByDate) =>
 const earliestWithWeight = (recordsAscByDate) =>
   recordsAscByDate.find((r) => typeof r.weight === "number") ?? null;
 
+// Floating-point subtraction/division can leave visual noise on otherwise-exact numbers, e.g.
+// 1.003 - 1 displaying as 0.0030000000000001137. This only rounds what's printed in the Lab
+// Trends text below — it doesn't touch the underlying trend math, comparisons, or lab status.
+const roundForDisplay = (value, decimals) => {
+  if (typeof value !== "number" || Number.isNaN(value)) return value;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+};
+
 export const buildVisitSummarySections = ({ records, checkins, labResults, savedGoal }) => {
   const sections = [];
 
@@ -126,11 +135,14 @@ export const buildVisitSummarySections = ({ records, checkins, labResults, saved
         title: "Lab Trends (2+ results, same unit)",
         lines: trends.map((t) => {
           const unitLabel = t.unit ? ` ${t.unit}` : "";
+          const displayAbsoluteChange =
+            t.absoluteChange === null ? null : roundForDisplay(Math.abs(t.absoluteChange), 4);
+          const displayPercentChange = t.percentChange === null ? null : roundForDisplay(t.percentChange, 1);
           const changeText =
-            t.absoluteChange === null
+            displayAbsoluteChange === null
               ? "no numeric change available"
-              : `${t.direction} by ${Math.abs(t.absoluteChange)}${unitLabel}` +
-                (t.percentChange !== null ? ` (${t.percentChange > 0 ? "+" : ""}${t.percentChange}%)` : "");
+              : `${t.direction} by ${displayAbsoluteChange}${unitLabel}` +
+                (displayPercentChange !== null ? ` (${displayPercentChange > 0 ? "+" : ""}${displayPercentChange}%)` : "");
           return (
             `${t.testName}: ${t.previous.result_value}${unitLabel} on ${formatFriendlyDate(t.previous.test_date)} → ` +
             `${t.latest.result_value}${unitLabel} on ${formatFriendlyDate(t.latest.test_date)} (${changeText})`
