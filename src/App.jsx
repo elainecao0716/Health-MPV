@@ -780,6 +780,9 @@ function App() {
       setLabDeleteStatus({ type: "error", message: error.message });
     } else {
       setLabDeleteStatus({ type: "success", message: "Deleted!" });
+      // Drop this row from the bulk-selection Set too, if it happened to be checked — otherwise
+      // its id would sit there orphaned since it no longer matches any row after the refetch.
+      setSelectedLabIds((prev) => updateSelectionAfterDelete(prev, [lab.id], []));
       await fetchLabResults();
     }
     setDeletingLabId(null);

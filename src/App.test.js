@@ -21,3 +21,21 @@ describe("Report Library bulk-delete confirmation wiring", () => {
     expect(appSource).not.toMatch(/handleBulkDeleteLabResults\(selectedInGroup,/);
   });
 });
+
+describe("handleDeleteLabResult selection cleanup", () => {
+  const functionMatch = appSource.match(/const handleDeleteLabResult = async \(lab\) => \{[\s\S]*?\n {2}\};/);
+  const body = functionMatch?.[0] ?? "";
+  const successBranch = body.slice(body.indexOf("} else {"));
+  const errorBranch = body.slice(0, body.indexOf("} else {"));
+
+  it("finds the handleDeleteLabResult function", () => {
+    expect(functionMatch).not.toBeNull();
+  });
+
+  it("removes the deleted row's id from selectedLabIds only on a successful delete", () => {
+    expect(successBranch).toMatch(
+      /setSelectedLabIds\(\(prev\) => updateSelectionAfterDelete\(prev, \[lab\.id\], \[\]\)\)/
+    );
+    expect(errorBranch).not.toMatch(/setSelectedLabIds/);
+  });
+});
