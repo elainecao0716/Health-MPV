@@ -36,6 +36,10 @@ import {
 } from "./utils/labValidation";
 import { groupLabResultsByTestDate } from "./utils/labHistoryGrouping";
 import { updateSelectionAfterDelete } from "./utils/labSelection";
+import {
+  buildBulkDeleteConfirmMessage,
+  buildBulkDeleteLargeBatchPromptMessage,
+} from "./utils/labBulkDeleteMessages";
 import { getImportedFilenames } from "./utils/importedReportFilenames";
 import { orderTestNamesByPriority } from "./utils/orderTestNamesByPriority";
 import { selectLabTrendSeries } from "./utils/labTrend";
@@ -1083,7 +1087,7 @@ function App() {
     });
   };
 
-  const handleBulkDeleteLabResults = async (rowsToDelete) => {
+  const handleBulkDeleteLabResults = async (rowsToDelete, { isWholeReport = false } = {}) => {
     const toDelete = rowsToDelete;
     if (toDelete.length === 0) {
       setBulkLabDeleteStatus({ type: "error", message: "Select at least one row to delete." });
@@ -1094,14 +1098,13 @@ function App() {
     const dateRangeText = dates[0] === dates[dates.length - 1] ? dates[0] : `${dates[0]} to ${dates[dates.length - 1]}`;
 
     const confirmed = window.confirm(
-      `Delete ${toDelete.length} lab result(s) dated ${dateRangeText}? This cannot be undone.`
+      buildBulkDeleteConfirmMessage(toDelete.length, dateRangeText, isWholeReport)
     );
     if (!confirmed) return;
 
     if (toDelete.length > BULK_LAB_DELETE_CONFIRM_THRESHOLD) {
       const typed = window.prompt(
-        `You are about to permanently delete ${toDelete.length} lab results (${dateRangeText}). ` +
-          `This is a large batch and cannot be undone. Type DELETE to confirm.`
+        buildBulkDeleteLargeBatchPromptMessage(toDelete.length, dateRangeText, isWholeReport)
       );
       if (typed !== "DELETE") {
         setBulkLabDeleteStatus({ type: "error", message: "Bulk delete cancelled — confirmation text did not match." });
@@ -2142,7 +2145,7 @@ function App() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleBulkDeleteLabResults(rows)}
+                        onClick={() => handleBulkDeleteLabResults(rows, { isWholeReport: true })}
                         disabled={bulkDeletingLabs}
                         aria-busy={bulkDeletingLabs}
                         className="btn btn-delete"
