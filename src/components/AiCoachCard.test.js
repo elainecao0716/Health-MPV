@@ -20,3 +20,18 @@ describe("AiCoachCard capability hint text", () => {
     expect(componentSource).not.toMatch(/insights based on your logged health records\.\s*<\/p>/i);
   });
 });
+
+describe("AiCoachCard Generate Advice gating", () => {
+  it("enables advice when any of records, check-ins, or lab results has data", () => {
+    expect(componentSource).toMatch(
+      /hasAnyData\s*=\s*records\.length > 0 \|\| checkins\.length > 0 \|\| labResults\.length > 0/,
+    );
+    expect(componentSource).toMatch(/disabled=\{loading \|\| !hasAnyData\}/);
+    expect(componentSource).toMatch(/\{!hasAnyData && !loading && \(/);
+  });
+
+  it("no longer gates the button or empty-state hint on health records alone", () => {
+    expect(componentSource).not.toMatch(/records\.length === 0/);
+    expect(componentSource).not.toMatch(/Add a health record first to get advice\./);
+  });
+});

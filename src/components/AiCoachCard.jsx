@@ -5,6 +5,8 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const hasAnyData = records.length > 0 || checkins.length > 0 || labResults.length > 0;
+
   const handleGenerate = async () => {
     setLoading(true);
     setError(null);
@@ -42,15 +44,17 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
 
       <button
         onClick={handleGenerate}
-        disabled={loading || records.length === 0}
+        disabled={loading || !hasAnyData}
         aria-busy={loading}
         className="btn btn-ai section"
       >
         {loading ? "Thinking..." : "Generate Advice"}
       </button>
 
-      {records.length === 0 && !loading && (
-        <p className="hint-text section">Add a health record first to get advice.</p>
+      {!hasAnyData && !loading && (
+        <p className="hint-text section">
+          Add a health record, daily check-in, or lab result first to get advice.
+        </p>
       )}
 
       {error && (
