@@ -10,6 +10,7 @@ import {
   looksLikePdf,
   extractDraftLabResults,
 } from "./labPdfExtraction.js";
+import { computeLabFacts } from "./labFacts.js";
 
 const PORT = process.env.PORT || 4000;
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
@@ -176,72 +177,6 @@ const groupByTestName = (labSummary) => {
     groups.get(entry.test_name).push(entry);
   }
   return groups;
-};
-
-// `entries` must be one test's results, already sorted oldest -> newest (summarizeLabResults
-// guarantees this). Deterministically computes every fact the AI is allowed to describe, so the
-// model never has to (and never should) do this math itself. Only compares/trends entries that
-// share the latest entry's unit — results recorded in an incompatible unit are excluded from the
-// trend math and counted separately, never combined into it.
-const computeLabFacts = (entries) => {
-  if (!entries || entries.length === 0) return null;
-
-  const latest = entries[entries.length - 1];
-  const latestUnit = latest.unit ?? null;
-  const compatible = entries.filter((e) => (e.unit ?? null) === latestUnit);
-  const previous = compatible.length >= 2 ? compatible[compatible.length - 2] : null;
-
-  const values = compatible.map((e) => e.result_value).filter((v) => typeof v === "number");
-  const highestValue = values.length ? Math.max(...values) : null;
-  const lowestValue = values.length ? Math.min(...values) : null;
-
-  let absoluteChange = null;
-  let percentChange = null;
-  let direction = null;
-  if (
-    previous &&
-    typeof latest.result_value === "number" &&
-    typeof previous.result_value === "number"
-  ) {
-    absoluteChange = latest.result_value - previous.result_value;
-    direction = absoluteChange > 0 ? "increased" : absoluteChange < 0 ? "decreased" : "unchanged";
-    // Percent change is only mathematically valid when the previous value isn't zero.
-    percentChange =
-      previous.result_value !== 0 ? Math.round((absoluteChange / previous.result_value) * 1000) / 10 : null;
-  }
-
-  const hasLow = typeof latest.reference_low === "number";
-  const hasHigh = typeof latest.reference_high === "number";
-  let latestRangeStatus = "No Range";
-  if (hasLow && typeof latest.result_value === "number" && latest.result_value < latest.reference_low) {
-    latestRangeStatus = "Low";
-  } else if (hasHigh && typeof latest.result_value === "number" && latest.result_value > latest.reference_high) {
-    latestRangeStatus = "High";
-  } else if (hasLow || hasHigh) {
-    latestRangeStatus = "In Range";
-  }
-
-  return {
-    test_name: latest.test_name,
-    category: latest.category ?? null,
-    unit: latestUnit,
-    latest_date: latest.date,
-    latest_value: latest.result_value,
-    reference_low: latest.reference_low,
-    reference_high: latest.reference_high,
-    latest_range_status: latestRangeStatus, // "Low" | "High" | "In Range" | "No Range"
-    previous_date: previous?.date ?? null,
-    previous_value: previous?.result_value ?? null,
-    absolute_change: absoluteChange,
-    percent_change: percentChange, // null when there's no previous result or previous value is 0
-    direction, // "increased" | "decreased" | "unchanged" | null
-    highest_value: highestValue,
-    lowest_value: lowestValue,
-    result_count_same_unit: compatible.length,
-    total_result_count: entries.length,
-    excluded_different_unit_count: entries.length - compatible.length,
-    has_trend: compatible.length >= 2,
-  };
 };
 
 // Computes deterministic facts for every distinct test in the summary, most recently tested first.
