@@ -13,6 +13,9 @@ import {
 import { computeLabFacts } from "./labFacts.js";
 
 const PORT = process.env.PORT || 4000;
+// Loopback only by default, so the backend (and the OpenAI key behind it) isn't reachable from
+// other devices on the local network. Set HOST (e.g. 0.0.0.0) only where that's intended.
+const HOST = process.env.HOST || "127.0.0.1";
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:5173";
 const MAX_RECORDS = 90; // cap payload/prompt size sent to OpenAI
 const MAX_CHECKINS = 60; // cap payload/prompt size sent to OpenAI
@@ -536,6 +539,6 @@ app.post("/api/labs/import-pdf", pdfImportRateLimiter, (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`[server] AI Health Coach backend running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`[server] AI Health Coach backend running on http://${HOST}:${PORT}`);
 });

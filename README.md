@@ -65,6 +65,7 @@ VITE_SUPABASE_ANON_KEY=
 ```
 OPENAI_API_KEY=
 PORT=
+HOST=
 CLIENT_ORIGIN=
 ```
 
@@ -74,6 +75,7 @@ CLIENT_ORIGIN=
 | `VITE_SUPABASE_ANON_KEY` | Yes | The **anon/public** key only — never the service-role key. Safe to ship in the frontend bundle; access is enforced by Supabase RLS, not by keeping this secret. |
 | `OPENAI_API_KEY` | Only for AI features/OCR | Server-only. Without it, AI Coach/Chat/Insights and scanned-PDF OCR return a clear "server is missing OPENAI_API_KEY" error; everything else still works. |
 | `PORT` | No | Backend port. Defaults to `4000`. |
+| `HOST` | No | Address the backend listens on. Defaults to `127.0.0.1` (this machine only). Set it (e.g. `0.0.0.0`) only when the backend must be reachable from other machines, such as behind a hosting proxy. |
 | `CLIENT_ORIGIN` | No | Allowed CORS origin for the backend. Defaults to `http://localhost:5173`. Set this to your real frontend URL in production. |
 
 ### Supabase setup requirements
