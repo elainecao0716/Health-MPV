@@ -81,6 +81,7 @@ SUPABASE_PUBLISHABLE_KEY=
 | `CLIENT_ORIGIN` | No | Allowed CORS origin for the backend. Defaults to `http://localhost:5173`. Set this to your real frontend URL in production. |
 | `SUPABASE_URL` | Yes, for AI features/PDF import | Same value as `VITE_SUPABASE_URL`. The backend uses it to verify each request's sign-in token with Supabase Auth. |
 | `SUPABASE_PUBLISHABLE_KEY` | Yes, for AI features/PDF import | Same **publishable** key as `VITE_SUPABASE_ANON_KEY` — never the service-role key. Without these two, the AI and PDF-import endpoints refuse every request (503). |
+| `USAGE_FILE` | No | Development AI usage file. Defaults to `server/data/usage.json` (git-ignored). |
 
 ### Supabase setup requirements
 
@@ -99,6 +100,10 @@ SUPABASE_PUBLISHABLE_KEY=
 ### Running it
 
 ```bash
+# Once, on a new development setup — creates server/data/usage.json (never overwrites it)
+cd server
+npm run usage:init
+
 # Terminal 1 — backend
 cd server
 npm run dev        # or: npm start
@@ -153,10 +158,28 @@ npm run preview       # serve the production build locally to sanity-check it
 - The backend has no database access of its own. It only processes rows the browser already read
   under RLS, and rejects (403) any request containing a row whose `user_id` isn't the signed-in
   user's.
-- Rate limits are per signed-in user: AI features 30 per 15 minutes and 100 per day (shared across
-  Coach, Chat, and Lab Insights); PDF imports 10 per 15 minutes and 20 per day. Repeated failed
-  sign-in attempts are limited to 20 per 15 minutes per IP. Limits are held in memory, so they
-  reset when the server restarts and are per server instance.
+- Rate limits are per signed-in user: AI features 30 per 15 minutes and 25 per day (shared across
+  Coach, Chat, and Lab Insights); PDF imports 10 per 15 minutes and 10 per day; scanned-report pages
+  16 per day. App-wide: 150 AI requests and 30 scanned pages per day. Repeated failed sign-in
+  attempts are limited to 20 per 15 minutes per IP. The 15-minute limits are held in memory; the
+  daily limits are saved with the usage tracking below, so they survive restarts.
+- **OpenAI spending is capped at $2.00 per day and $30.00 per month** for the whole app (UTC days and
+  months). Before each OpenAI call, its worst-case cost (official gpt-4o-mini prices; every text byte
+  counted as a token; images priced by their real size) is reserved and saved; the call is refused if
+  that would exceed either budget, and the reservation is corrected to the actual cost afterwards.
+  Simultaneous requests can't jointly exceed a budget. Prices live in `server/usage.js`.
+- If AI usage can't be tracked reliably — the usage file is missing, corrupt, unreadable, or can't be
+  saved — AI requests are refused (503) rather than restarting totals from zero. Everything else,
+  including text-PDF import, keeps working.
+- **The usage file is for development only.** The server refuses to start with `NODE_ENV=production`
+  until a verified persistent usage store is configured, because many hosting platforms wipe local
+  disks on every deploy.
+- Backend responses carry security headers (via `helmet`): no `X-Powered-By`, no MIME sniffing or
+  framing, `no-referrer`, a `default-src 'none'` content policy, HSTS, and `Cache-Control: no-store`
+  so responses containing health information aren't cached.
+- Server logs pass through a scrubber that blanks anything shaped like an API key, sign-in token, or
+  email address; errors are logged only as a status number and short code (e.g. `insufficient_quota`),
+  never their raw message.
 - Errors returned to the client and written to server logs are sanitized — never raw stack traces,
   full error objects, request bodies, record contents, or sign-in tokens (malformed or oversized
   request bodies get a plain JSON error, not Express's default HTML page).

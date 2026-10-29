@@ -1,7 +1,11 @@
 import { readFileSync, readdirSync } from "node:fs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RATE_LIMITS, createApp } from "./app.js";
+import { USAGE_LIMITS, createFileStorage, createUsageTracker, initializeUsageFile } from "./usage.js";
 
 // Security tests against the real Express routes, built with a fake OpenAI client and a fake
 // Supabase token verifier — no network, no OpenAI charges, no real health data.
@@ -10,6 +14,7 @@ const CLIENT_ORIGIN = "http://localhost:5173";
 const USER_A = "user-a-0000";
 const USER_B = "user-b-1111";
 const TOKENS = { "token-a": USER_A, "token-b": USER_B };
+for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) TOKENS[`token-u${n}`] = `user-u${n}`;
 const PUBLISHABLE_KEY_AS_TOKEN = "sb_publishable_ABCdef123";
 
 const fakeVerifyUser = vi.fn(async (token) => {
@@ -18,8 +23,17 @@ const fakeVerifyUser = vi.fn(async (token) => {
   return { status: "invalid" }; // expired, revoked, junk, or the publishable key itself
 });
 
+// Answers like OpenAI, including the token usage the cost guard settles against. OCR requests (JSON
+// mode) get an empty results list.
 const makeOpenai = () => ({
-  chat: { completions: { create: vi.fn(async () => ({ choices: [{ message: { content: "AI RESPONSE" } }] })) } },
+  chat: {
+    completions: {
+      create: vi.fn(async (args) => ({
+        choices: [{ message: { content: args.response_format ? '{"results":[]}' : "AI RESPONSE" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1200, completion_tokens: 150 },
+      })),
+    },
+  },
 });
 
 // Rows exactly as the browser sends them (Supabase select "*" includes user_id).
@@ -54,14 +68,47 @@ const buildTestPdf = () => {
   return Buffer.from(pdf, "latin1");
 };
 
+// A one-page "scanned" PDF: a drawn shape and no text layer, so the import goes down the OCR path.
+const buildScannedPdf = (pages = 1) => {
+  const kids = Array.from({ length: pages }, (_, i) => `${4 + i * 2} 0 R`).join(" ");
+  const objects = ["<< /Type /Catalog /Pages 2 0 R >>", `<< /Type /Pages /Kids [${kids}] /Count ${pages} >>`, "<< >>"];
+  for (let i = 0; i < pages; i += 1) {
+    const stream = "0.2 0.2 0.2 rg 50 600 500 40 re f";
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${5 + i * 2} 0 R >>`);
+    objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+  }
+  let pdf = "%PDF-1.4\n";
+  const offsets = objects.map((body, i) => {
+    const offset = pdf.length;
+    pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+    return offset;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  pdf += offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("");
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(pdf, "latin1");
+};
+
 let server;
 let baseUrl;
 let openai;
 let logs;
+let usageDir;
+let usageFile;
+let usageTracker;
 
-const start = async (options = {}) => {
+// Each app gets a real file-backed usage tracker in a temporary folder (development storage).
+const makeTracker = async (limits = USAGE_LIMITS) => {
+  const tracker = createUsageTracker({ storage: createFileStorage(usageFile), limits });
+  await tracker.load();
+  return tracker;
+};
+
+const start = async ({ usageLimits, ...options } = {}) => {
   openai = makeOpenai();
-  const app = createApp({ openai, clientOrigin: CLIENT_ORIGIN, verifyUser: fakeVerifyUser, ...options });
+  usageTracker = "usageTracker" in options ? options.usageTracker : await makeTracker(usageLimits);
+  const app = createApp({ openai, clientOrigin: CLIENT_ORIGIN, verifyUser: fakeVerifyUser, usageTracker, ...options });
   server = await new Promise((resolve) => {
     const s = app.listen(0, "127.0.0.1", () => resolve(s));
   });
@@ -104,6 +151,9 @@ const callProtected = (path, token) => (path === "/api/labs/import-pdf" ? upload
 
 beforeEach(async () => {
   fakeVerifyUser.mockClear();
+  usageDir = await mkdtemp(path.join(tmpdir(), "app-usage-"));
+  usageFile = path.join(usageDir, "usage.json");
+  await initializeUsageFile(usageFile);
   logs = [];
   for (const level of ["log", "warn", "error"]) {
     vi.spyOn(console, level).mockImplementation((...args) => logs.push(args.map(String).join(" ")));
@@ -114,7 +164,13 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   await new Promise((resolve) => server.close(resolve));
+  await rm(usageDir, { recursive: true, force: true });
 });
+
+const restart = async (options = {}) => {
+  await new Promise((resolve) => server.close(resolve));
+  await start(options);
+};
 
 describe("authentication is required on every protected endpoint", () => {
   it.each(ALL_PROTECTED)("%s: no token → 401, nothing processed, no OpenAI call", async (path) => {
@@ -278,15 +334,16 @@ describe("users cannot access, modify, or delete another user's health records",
 });
 
 describe("rate limits (per user)", () => {
-  it("uses the approved limits", () => {
+  it("keeps the approved 15-minute limits unchanged", () => {
     expect(RATE_LIMITS).toEqual({
-      ai: { perFifteenMinutes: 30, perDay: 100 },
-      pdfImport: { perFifteenMinutes: 10, perDay: 20 },
+      ai: { perFifteenMinutes: 30 },
+      pdfImport: { perFifteenMinutes: 10 },
       failedSignInsPerIp: { perFifteenMinutes: 20 },
     });
   });
 
   it("AI: 30 requests per 15 minutes per user, shared across all three AI endpoints; other users unaffected", async () => {
+    await restart({ usageLimits: { ...USAGE_LIMITS, user: { ...USAGE_LIMITS.user, aiRequestsPerDay: 1000 } } });
     for (let i = 0; i < 30; i += 1) {
       const res = await callProtected(AI_PATHS[i % 3], "token-a");
       expect(res.status).toBe(200);
@@ -299,15 +356,24 @@ describe("rate limits (per user)", () => {
     expect(openai.chat.completions.create).toHaveBeenCalledTimes(31); // 30 for A + 1 for B; none for the blocked call
   });
 
-  it("AI: 100 requests per day per user", async () => {
-    await new Promise((resolve) => server.close(resolve));
-    await start({ rateLimits: { ...RATE_LIMITS, ai: { perFifteenMinutes: 1000, perDay: 100 } } });
-
-    for (let i = 0; i < 100; i += 1) expect((await callProtected("/api/coach", "token-a")).status).toBe(200);
-    const blocked = await callProtected("/api/coach", "token-a");
+  it("AI: 25 requests per day per user, shared across the three AI endpoints", async () => {
+    for (let i = 0; i < 25; i += 1) expect((await callProtected(AI_PATHS[i % 3], "token-a")).status).toBe(200);
+    const blocked = await callProtected("/api/lab-insights", "token-a");
     expect(blocked.status).toBe(429);
     expect((await blocked.json()).error).toMatch(/today's limit for AI features/);
+    expect(openai.chat.completions.create).toHaveBeenCalledTimes(25);
     expect((await callProtected("/api/coach", "token-b")).status).toBe(200);
+  });
+
+  it("AI: 150 requests per day for the whole app", async () => {
+    await restart({ rateLimits: { ...RATE_LIMITS, ai: { perFifteenMinutes: 1000 } } });
+    for (let n = 1; n <= 6; n += 1) {
+      for (let i = 0; i < 25; i += 1) expect((await callProtected("/api/coach", `token-u${n}`)).status).toBe(200);
+    }
+    const blocked = await callProtected("/api/coach", "token-u7");
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error).toMatch(/AI features have reached today's limit/);
+    expect(openai.chat.completions.create).toHaveBeenCalledTimes(150);
   });
 
   it("PDF imports: 10 per 15 minutes per user", async () => {
@@ -318,14 +384,13 @@ describe("rate limits (per user)", () => {
     expect((await uploadPdf("token-b")).status).toBe(200);
   });
 
-  it("PDF imports: 20 per day per user", async () => {
-    await new Promise((resolve) => server.close(resolve));
-    await start({ rateLimits: { ...RATE_LIMITS, pdfImport: { perFifteenMinutes: 1000, perDay: 20 } } });
-
-    for (let i = 0; i < 20; i += 1) expect((await uploadPdf("token-a")).status).toBe(200);
+  it("PDF imports: 10 per day per user", async () => {
+    await restart({ rateLimits: { ...RATE_LIMITS, pdfImport: { perFifteenMinutes: 1000 } } });
+    for (let i = 0; i < 10; i += 1) expect((await uploadPdf("token-a")).status).toBe(200);
     const blocked = await uploadPdf("token-a");
     expect(blocked.status).toBe(429);
     expect((await blocked.json()).error).toMatch(/today's limit for PDF imports/);
+    expect((await uploadPdf("token-b")).status).toBe(200);
   });
 
   it("AI and PDF limits are separate", async () => {
@@ -336,13 +401,177 @@ describe("rate limits (per user)", () => {
 
   it("unauthenticated requests don't use up a user's allowance", async () => {
     for (let i = 0; i < 15; i += 1) await post("/api/coach", { body: aiBodies(USER_A)["/api/coach"] });
-    for (let i = 0; i < 30; i += 1) expect((await callProtected("/api/coach", "token-a")).status).toBe(200);
+    for (let i = 0; i < 25; i += 1) expect((await callProtected("/api/coach", "token-a")).status).toBe(200);
   });
 
   it("repeated failed sign-ins from one address are throttled (20 per 15 minutes)", async () => {
     for (let i = 0; i < 20; i += 1) expect((await callProtected("/api/coach", "token-guess")).status).toBe(401);
     expect((await callProtected("/api/coach", "token-guess")).status).toBe(429);
     expect(fakeVerifyUser).toHaveBeenCalledTimes(20); // the 21st attempt never reaches Supabase
+  });
+
+  it("daily limits survive a server restart", async () => {
+    for (let i = 0; i < 25; i += 1) await callProtected("/api/coach", "token-a");
+    for (let i = 0; i < 10; i += 1) await uploadPdf("token-b");
+    await restart(); // new app + new tracker reading the same usage file
+    expect((await callProtected("/api/coach", "token-a")).status).toBe(429);
+    await restart({ rateLimits: { ...RATE_LIMITS, pdfImport: { perFifteenMinutes: 1000 } } });
+    expect((await uploadPdf("token-b")).status).toBe(429);
+  });
+});
+
+describe("AI cost protection", () => {
+  const savedUsage = async () => JSON.parse(await readFile(usageFile, "utf8"));
+
+  it("settles each call to the actual cost OpenAI reports", async () => {
+    await callProtected("/api/coach", "token-a");
+    expect((await savedUsage()).daily.spentUsd).toBeCloseTo((1200 * 0.15 + 150 * 0.6) / 1e6, 12);
+  });
+
+  it("refuses before calling OpenAI when the daily budget can't cover the worst case", async () => {
+    await restart({ usageLimits: { ...USAGE_LIMITS, dailyBudgetUsd: 0.0005 } });
+    const res = await callProtected("/api/chat", "token-a");
+    expect(res.status).toBe(429);
+    expect((await res.json()).error).toMatch(/spending limit/);
+    expect(openai.chat.completions.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses before calling OpenAI when the monthly budget can't cover the worst case", async () => {
+    await restart({ usageLimits: { ...USAGE_LIMITS, monthlyBudgetUsd: 0.0005 } });
+    expect((await callProtected("/api/lab-insights", "token-a")).status).toBe(429);
+    expect(openai.chat.completions.create).not.toHaveBeenCalled();
+  });
+
+  it("40 simultaneous AI requests from different users never exceed the budget", async () => {
+    // Slow fake OpenAI so every request is in flight at once; budget fits only a few worst cases.
+    await restart({ usageLimits: { ...USAGE_LIMITS, dailyBudgetUsd: 0.006 }, rateLimits: { ...RATE_LIMITS } });
+    openai.chat.completions.create.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      return { choices: [{ message: { content: "AI RESPONSE" } }], usage: { prompt_tokens: 1200, completion_tokens: 150 } };
+    });
+    const users = Object.keys(TOKENS).filter((t) => t.startsWith("token-u"));
+    const results = await Promise.all(Array.from({ length: 40 }, (_, i) => callProtected("/api/coach", users[i % users.length])));
+    const ok = results.filter((r) => r.status === 200).length;
+    const limited = results.filter((r) => r.status === 429).length;
+
+    expect(ok + limited).toBe(40);
+    expect(ok).toBeGreaterThan(0);
+    expect(openai.chat.completions.create).toHaveBeenCalledTimes(ok);
+    // Every call was within budget at its worst case when sent: worst case x calls <= budget.
+    const worst = openai.chat.completions.create.mock.calls.map(([args]) => args);
+    const { estimateMaxCostUsd } = await import("./usage.js");
+    expect(worst.reduce((sum, args) => sum + estimateMaxCostUsd(args), 0)).toBeLessThanOrEqual(0.006 + 1e-9);
+    expect((await savedUsage()).daily.spentUsd).toBeLessThanOrEqual(0.006);
+  });
+
+  it("60 simultaneous requests: the app-wide request cap holds exactly", async () => {
+    await restart({ usageLimits: { ...USAGE_LIMITS, app: { ...USAGE_LIMITS.app, aiRequestsPerDay: 20 } } });
+    const users = Object.keys(TOKENS).filter((t) => t.startsWith("token-u"));
+    const results = await Promise.all(Array.from({ length: 60 }, (_, i) => callProtected("/api/coach", users[i % users.length])));
+    expect(results.filter((r) => r.status === 200).length).toBe(20);
+    expect(openai.chat.completions.create).toHaveBeenCalledTimes(20);
+  });
+
+  it("scanned PDFs: pages are reserved before any page is sent, and capped at 16 per user per day", async () => {
+    await restart({ rateLimits: { ...RATE_LIMITS, pdfImport: { perFifteenMinutes: 1000 } } });
+    const eightPages = buildScannedPdf(8);
+    expect((await uploadPdf("token-a", eightPages)).status).toBe(200);
+    expect((await uploadPdf("token-a", eightPages)).status).toBe(200);
+    expect(openai.chat.completions.create).toHaveBeenCalledTimes(16);
+
+    const blocked = await uploadPdf("token-a", buildScannedPdf(1));
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error).toMatch(/today's limit for reading scanned reports/);
+    expect(openai.chat.completions.create).toHaveBeenCalledTimes(16); // nothing sent for the refused report
+    expect((await uploadPdf("token-a")).status).toBe(200); // text PDFs (no OpenAI) still work
+  });
+
+  it("scanned PDFs: 30 pages per day for the whole app", async () => {
+    await restart({ rateLimits: { ...RATE_LIMITS, pdfImport: { perFifteenMinutes: 1000 } } });
+    for (const token of ["token-u1", "token-u2", "token-u3"]) expect((await uploadPdf(token, buildScannedPdf(8))).status).toBe(200);
+    const blocked = await uploadPdf("token-u4", buildScannedPdf(8)); // 24 + 8 > 30
+    expect(blocked.status).toBe(429);
+    expect((await blocked.json()).error).toMatch(/unavailable for the rest of today/);
+    expect((await uploadPdf("token-u4", buildScannedPdf(6))).status).toBe(200); // exactly 30
+  });
+
+  it("scanned pages are priced from the real image size before sending", async () => {
+    await uploadPdf("token-a", buildScannedPdf(1));
+    const saved = await savedUsage();
+    expect(saved.daily.scannedPages).toBe(1);
+    expect(saved.daily.spentUsd).toBeCloseTo((1200 * 0.15 + 150 * 0.6) / 1e6, 12); // settled to actual
+  });
+});
+
+describe("usage tracking failures: AI blocked, everything else keeps working", () => {
+  const startWithBrokenUsage = async () => {
+    await rm(usageFile); // e.g. the file went missing
+    await restart();
+    expect(usageTracker.status()).toEqual({ healthy: false, problem: "missing" });
+  };
+
+  it.each(AI_PATHS)("%s → 503 and OpenAI is never called", async (path) => {
+    await startWithBrokenUsage();
+    const res = await callProtected(path, "token-a");
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/temporarily unavailable/);
+    expect(openai.chat.completions.create).not.toHaveBeenCalled();
+  });
+
+  it("text-PDF import still works; scanned-PDF reading is blocked", async () => {
+    await startWithBrokenUsage();
+    expect((await uploadPdf("token-a")).status).toBe(200);
+    const scanned = await uploadPdf("token-a", buildScannedPdf(1));
+    expect(scanned.status).toBe(503);
+    expect(openai.chat.completions.create).not.toHaveBeenCalled();
+  });
+
+  it("no tracker configured at all → AI blocked (fails closed)", async () => {
+    await restart({ usageTracker: undefined });
+    expect((await callProtected("/api/coach", "token-a")).status).toBe(503);
+    expect(openai.chat.completions.create).not.toHaveBeenCalled();
+  });
+
+  it("a corrupted usage file is never silently reset", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(usageFile, "{ this is not json");
+    await restart();
+    expect((await callProtected("/api/coach", "token-a")).status).toBe(503);
+    expect(await readFile(usageFile, "utf8")).toBe("{ this is not json"); // left untouched for inspection
+  });
+});
+
+describe("security headers", () => {
+  const expectSecurityHeaders = (res) => {
+    expect(res.headers.get("x-powered-by")).toBeNull();
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("content-security-policy")).toMatch(/default-src 'none'.*frame-ancestors 'none'/);
+    expect(res.headers.get("strict-transport-security")).toMatch(/max-age=\d+/);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  };
+
+  it("are present on successful responses from every endpoint", async () => {
+    expectSecurityHeaders(await fetch(`${baseUrl}/api/health`));
+    for (const path of ALL_PROTECTED) expectSecurityHeaders(await callProtected(path, "token-a"));
+  });
+
+  it("are present on error responses (401, 403, 404, 400)", async () => {
+    expectSecurityHeaders(await post("/api/coach", { body: {} }));
+    expectSecurityHeaders(await post("/api/coach", { token: "token-a", body: { records: [record(USER_B)] } }));
+    expectSecurityHeaders(await fetch(`${baseUrl}/api/nope`));
+    expectSecurityHeaders(await post("/api/coach", { token: "token-a", raw: "{bad", headers: { "Content-Type": "application/json" } }));
+  });
+
+  it("don't interfere with the browser's cross-origin (CORS) access from the app's origin", async () => {
+    const res = await fetch(`${baseUrl}/api/coach`, {
+      method: "POST",
+      headers: { Origin: CLIENT_ORIGIN, Authorization: "Bearer token-a", "Content-Type": "application/json" },
+      body: JSON.stringify(aiBodies(USER_A)["/api/coach"]),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe(CLIENT_ORIGIN);
   });
 });
 

@@ -2,6 +2,7 @@
 // than read from the environment here, so tests can construct it with fake OpenAI/Supabase clients;
 // server.js loads the real configuration and starts listening.
 import express from "express";
+import helmet from "helmet";
 import cors from "cors";
 import multer from "multer";
 import rateLimit from "express-rate-limit";
@@ -13,6 +14,8 @@ import {
 } from "./labPdfExtraction.js";
 import { computeLabFacts } from "./labFacts.js";
 import { createRequireUser, rowsBelongToUser } from "./auth.js";
+import { logError, logInfo } from "./log.js";
+import { UsageLimitError, createUnavailableTracker, guardOpenai } from "./usage.js";
 
 const MAX_RECORDS = 90; // cap payload/prompt size sent to OpenAI
 const MAX_CHECKINS = 60; // cap payload/prompt size sent to OpenAI
@@ -163,30 +166,44 @@ const labFactsContext = (factsList) =>
       `estimate, or contradict any value here; use the raw lab results above only for extra context like notes ` +
       `(JSON, one entry per test, most recently tested first):\n${JSON.stringify(factsList)}`;
 
-// Logs only status/message, never the raw error object or request body —
-// keeps the API key and user note contents out of the terminal.
-const logError = (label, err) => {
-  console.error(`[server] ${label}:`, err?.status ?? "", err?.message ?? String(err));
-};
-
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-// Per-user caps on the endpoints that cost OpenAI credits or CPU, keyed by the verified Supabase user
-// id (so users sharing an IP don't affect each other, and changing IP doesn't reset a user's count).
-// failedSignInsPerIp limits requests rejected for a missing/invalid token, per client IP, so the
-// server can't be used to hammer Supabase Auth with guessed tokens.
+// Short-term per-user caps on the endpoints that cost OpenAI credits or CPU, keyed by the verified
+// Supabase user id (so users sharing an IP don't affect each other, and changing IP doesn't reset a
+// user's count). Daily caps and spending budgets are enforced by the usage tracker (usage.js), which
+// keeps them across restarts. failedSignInsPerIp limits requests rejected for a missing/invalid token,
+// per client IP, so the server can't be used to hammer Supabase Auth with guessed tokens.
 export const RATE_LIMITS = {
-  ai: { perFifteenMinutes: 30, perDay: 100 },
-  pdfImport: { perFifteenMinutes: 10, perDay: 20 },
+  ai: { perFifteenMinutes: 30 },
+  pdfImport: { perFifteenMinutes: 10 },
   failedSignInsPerIp: { perFifteenMinutes: 20 },
 };
 
 const FOREIGN_DATA_ERROR = "This request includes health data that doesn't belong to your account.";
 
-export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_LIMITS }) => {
+export const createApp = ({ openai, clientOrigin, verifyUser, usageTracker, rateLimits = RATE_LIMITS }) => {
   const app = express();
+  // Security headers on every response: no X-Powered-By, no MIME sniffing, no framing, no referrer,
+  // and a content policy that lets these JSON responses load nothing. Cross-Origin-Resource-Policy
+  // only governs no-cors loads (e.g. <img>); the app's fetch() calls use CORS and are unaffected.
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        useDefaults: false,
+        directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"], baseUri: ["'none'"], formAction: ["'none'"] },
+      },
+      crossOriginResourcePolicy: { policy: "same-origin" },
+    })
+  );
+  // API responses carry private health information, so browsers and proxies must not keep copies.
+  app.use("/api", (_req, res, next) => {
+    res.set("Cache-Control", "no-store");
+    next();
+  });
   app.use(cors({ origin: clientOrigin }));
+
+  // Fails closed: with no tracker configured, every AI operation is refused.
+  const tracker = usageTracker ?? createUnavailableTracker();
 
   // Every protected route runs: failed-sign-in limiter -> requireUser -> per-user limiters -> body
   // parsing -> handler. The body is parsed only after the user is verified, so unauthenticated
@@ -218,15 +235,37 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
 
   const aiLimiters = [
     perUserLimiter(FIFTEEN_MINUTES_MS, rateLimits.ai.perFifteenMinutes, "Too many requests. Please wait a few minutes and try again."),
-    perUserLimiter(ONE_DAY_MS, rateLimits.ai.perDay, "You've reached today's limit for AI features. Please try again tomorrow."),
   ];
   const pdfImportLimiters = [
     perUserLimiter(FIFTEEN_MINUTES_MS, rateLimits.pdfImport.perFifteenMinutes, "Too many PDF imports. Please wait a few minutes and try again."),
-    perUserLimiter(ONE_DAY_MS, rateLimits.pdfImport.perDay, "You've reached today's limit for PDF imports. Please try again tomorrow."),
   ];
 
-  const protectedAi = [failedSignInLimiter, requireUser, ...aiLimiters, jsonBody];
-  const protectedPdfImport = [failedSignInLimiter, requireUser, ...pdfImportLimiters];
+  const sendUsageError = (res, err) => {
+    if (err instanceof UsageLimitError) return res.status(err.status).json({ error: err.message });
+    logError("usage tracking error", err);
+    return res.status(503).json({ error: "AI features are temporarily unavailable. Please try again later." });
+  };
+  // Daily caps, counted (and saved) after sign-in and before the request body is read — so, like the
+  // 15-minute limits, requests that later fail validation still count.
+  const countAiRequest = async (req, res, next) => {
+    try {
+      await tracker.countAiRequest(req.user.id);
+    } catch (err) {
+      return sendUsageError(res, err);
+    }
+    next();
+  };
+  const countPdfImport = async (req, res, next) => {
+    try {
+      await tracker.countPdfImport(req.user.id);
+    } catch (err) {
+      return sendUsageError(res, err);
+    }
+    next();
+  };
+
+  const protectedAi = [failedSignInLimiter, requireUser, ...aiLimiters, countAiRequest, jsonBody];
+  const protectedPdfImport = [failedSignInLimiter, requireUser, ...pdfImportLimiters, countPdfImport];
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true });
@@ -264,12 +303,12 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
       const checkinSummary = summarizeCheckins(checkinsArr);
       const labSummary = summarizeLabResults(labResultsArr);
       const labFacts = computeAllLabFacts(labSummary, MAX_FACT_TESTS);
-      console.log(
+      logInfo(
         `[server] POST /api/coach — ${summary.length} record(s), ${checkinSummary.length} check-in(s), ` +
           `${labSummary.length} lab result(s), ${labFacts.length} lab fact group(s), goal: ${typeof goalWeight === "number" ? "set" : "none"}`
       );
 
-      const completion = await openai.chat.completions.create({
+      const completion = await guardOpenai(openai, tracker).chat.completions.create({
         model: "gpt-4o-mini",
         temperature: 0.4,
         max_tokens: 400,
@@ -305,6 +344,7 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
 
       res.json({ advice });
     } catch (err) {
+      if (err instanceof UsageLimitError) return res.status(err.status).json({ error: err.message });
       logError("/api/coach failed", err);
       res.status(500).json({ error: "Failed to generate advice. Please try again." });
     }
@@ -367,13 +407,13 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
         content: m.content.slice(0, MAX_MESSAGE_LENGTH),
       }));
 
-      console.log(
+      logInfo(
         `[server] POST /api/chat — ${history.length} message(s), ${summary.length} record(s), ` +
           `${checkinSummary.length} check-in(s), ${labSummary.length} lab result(s), ${labFacts.length} lab fact ` +
           `group(s), goal: ${typeof goalWeight === "number" ? "set" : "none"}`
       );
 
-      const completion = await openai.chat.completions.create({
+      const completion = await guardOpenai(openai, tracker).chat.completions.create({
         model: "gpt-4o-mini",
         temperature: 0.4,
         max_tokens: 400,
@@ -401,6 +441,7 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
 
       res.json({ reply });
     } catch (err) {
+      if (err instanceof UsageLimitError) return res.status(err.status).json({ error: err.message });
       logError("/api/chat failed", err);
       res.status(500).json({ error: "Failed to generate a reply. Please try again." });
     }
@@ -450,7 +491,7 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
         }
       }
 
-      console.log(
+      logInfo(
         `[server] POST /api/lab-insights — mode=${mode}, ${factsList.length} test(s) analyzed, ` +
           `${labSummary.length} lab result(s) received`
       );
@@ -469,7 +510,7 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
             "After covering every test, add one shared 'Questions to discuss with a clinician' list and one shared " +
             "'Safety note' at the end.";
 
-      const completion = await openai.chat.completions.create({
+      const completion = await guardOpenai(openai, tracker).chat.completions.create({
         model: "gpt-4o-mini",
         temperature: 0.3,
         max_tokens: mode === "single" ? 450 : 900,
@@ -501,6 +542,7 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
 
       res.json({ insights, generatedAt: new Date().toISOString(), facts: factsList });
     } catch (err) {
+      if (err instanceof UsageLimitError) return res.status(err.status).json({ error: err.message });
       logError("/api/lab-insights failed", err);
       res.status(500).json({ error: "Failed to generate lab insights. Please try again." });
     }
@@ -520,7 +562,7 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
         if (uploadErr.code === "LIMIT_UNEXPECTED_FILE" || uploadErr.code === "LIMIT_FILE_COUNT") {
           return res.status(400).json({ error: "Only a single PDF file is accepted." });
         }
-        console.log(`[server] [${requestId}] POST /api/labs/import-pdf — upload rejected: ${uploadErr.code ?? "unknown"}`);
+        logInfo(`[server] [${requestId}] POST /api/labs/import-pdf — upload rejected: ${uploadErr.code ?? "unknown"}`);
         return res.status(400).json({ error: "Could not process the uploaded file." });
       }
 
@@ -540,14 +582,18 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
         const extensionOk = typeof originalname === "string" && originalname.toLowerCase().endsWith(".pdf");
         const mimeOk = mimetype === "application/pdf";
         if (!extensionOk || !mimeOk) {
-          console.log(`[server] [${requestId}] POST /api/labs/import-pdf — extension/MIME mismatch on a valid PDF`);
+          logInfo(`[server] [${requestId}] POST /api/labs/import-pdf — extension/MIME mismatch on a valid PDF`);
         }
 
-        const result = await extractDraftLabResults({ buffer, openai });
+        const result = await extractDraftLabResults({
+          buffer,
+          openai: openai && guardOpenai(openai, tracker),
+          beforeOcr: (pages) => tracker.reserveScannedPages(req.user.id, pages),
+        });
         const durationMs = Date.now() - startedAt;
 
         // Safe technical facts only — never the extracted report metadata, text, or values.
-        console.log(
+        logInfo(
           `[server] [${requestId}] POST /api/labs/import-pdf — status=${result.status}, ${result.pageCount} page(s), ` +
             `${buffer.length} byte(s), ${result.draftRows.length} draft row(s), ${durationMs}ms`
         );
@@ -562,8 +608,12 @@ export const createApp = ({ openai, clientOrigin, verifyUser, rateLimits = RATE_
         });
       } catch (err) {
         const durationMs = Date.now() - startedAt;
+        if (err instanceof UsageLimitError) {
+          logInfo(`[server] [${requestId}] POST /api/labs/import-pdf — refused: ${err.code}, ${durationMs}ms`);
+          return res.status(err.status).json({ error: err.message });
+        }
         if (err instanceof LabPdfError) {
-          console.log(`[server] [${requestId}] POST /api/labs/import-pdf — rejected: ${err.code}, ${durationMs}ms`);
+          logInfo(`[server] [${requestId}] POST /api/labs/import-pdf — rejected: ${err.code}, ${durationMs}ms`);
           return res.status(400).json({ error: err.message });
         }
         logError(`/api/labs/import-pdf failed [${requestId}]`, err);

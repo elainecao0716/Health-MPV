@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 .env
 src/.env
+
+# Local AI usage tracking (development only)
+server/data/

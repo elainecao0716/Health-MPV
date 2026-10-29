@@ -581,7 +581,9 @@ export const extractViaOcr = async ({ pdfDocument, openai, reportMeta }) => {
 // --- Orchestration --------------------------------------------------------------------------
 
 // status: "ok" | "scanned_no_ocr" | "scanned_ocr"
-export const extractDraftLabResults = async ({ buffer, openai }) => {
+// beforeOcr(pageCount), if given, runs once before any page is sent for OCR — the caller uses it to
+// reserve the user's scanned-page allowance up front (and can throw to stop the import cleanly).
+export const extractDraftLabResults = async ({ buffer, openai, beforeOcr }) => {
   const pdfDocument = await loadPdfDocument(buffer);
   try {
     const pagesText = await extractTextPerPage(pdfDocument);
@@ -611,6 +613,7 @@ export const extractDraftLabResults = async ({ buffer, openai }) => {
       };
     }
 
+    if (beforeOcr) await beforeOcr(Math.min(pdfDocument.numPages, MAX_OCR_PAGES));
     const { draftRows, warnings, ocrReportDate, ocrLabName } = await extractViaOcr({ pdfDocument, openai, reportMeta });
     return {
       status: "scanned_ocr",
