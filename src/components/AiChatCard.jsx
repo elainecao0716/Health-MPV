@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import MarkdownMessage from "./MarkdownMessage";
+import { apiFetch } from "../utils/apiFetch";
 
 const STARTER_QUESTIONS = [
   "Summarize my progress",
@@ -29,7 +30,7 @@ function AiChatCard({ records, goalWeight, checkins, labResults }) {
     setLoading(true);
 
     try {
-      const response = await fetch("/api/chat", {
+      const response = await apiFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: nextMessages, records, goalWeight, checkins, labResults }),

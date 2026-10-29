@@ -1,4 +1,5 @@
 import { memo, useState } from "react";
+import { apiFetch } from "../utils/apiFetch";
 
 function AiLabInsightsCard({ labResults }) {
   const [selectedTest, setSelectedTest] = useState("");
@@ -19,7 +20,7 @@ function AiLabInsightsCard({ labResults }) {
     setError(null);
 
     try {
-      const response = await fetch("/api/lab-insights", {
+      const response = await apiFetch("/api/lab-insights", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(

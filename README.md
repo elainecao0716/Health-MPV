@@ -67,6 +67,8 @@ OPENAI_API_KEY=
 PORT=
 HOST=
 CLIENT_ORIGIN=
+SUPABASE_URL=
+SUPABASE_PUBLISHABLE_KEY=
 ```
 
 | Variable | Required | Notes |
@@ -77,6 +79,8 @@ CLIENT_ORIGIN=
 | `PORT` | No | Backend port. Defaults to `4000`. |
 | `HOST` | No | Address the backend listens on. Defaults to `127.0.0.1` (this machine only). Set it (e.g. `0.0.0.0`) only when the backend must be reachable from other machines, such as behind a hosting proxy. |
 | `CLIENT_ORIGIN` | No | Allowed CORS origin for the backend. Defaults to `http://localhost:5173`. Set this to your real frontend URL in production. |
+| `SUPABASE_URL` | Yes, for AI features/PDF import | Same value as `VITE_SUPABASE_URL`. The backend uses it to verify each request's sign-in token with Supabase Auth. |
+| `SUPABASE_PUBLISHABLE_KEY` | Yes, for AI features/PDF import | Same **publishable** key as `VITE_SUPABASE_ANON_KEY` — never the service-role key. Without these two, the AI and PDF-import endpoints refuse every request (503). |
 
 ### Supabase setup requirements
 
@@ -141,9 +145,21 @@ npm run preview       # serve the production build locally to sanity-check it
   never to diagnose, recommend medication changes, or invent history not present in the data.
 - Backend request bodies and array payloads are size-capped; AI prompt context is trimmed to the
   most recent/relevant records rather than sending a user's entire history.
-- The AI and PDF-import endpoints are rate-limited per IP.
+- The AI and PDF-import endpoints require sign-in: the browser sends its Supabase session token
+  (`Authorization: Bearer …`) and the backend verifies it with Supabase Auth before doing any work.
+  Missing, expired, or signed-out tokens get 401; if Supabase can't be reached the request is
+  refused (503), never let through. Request bodies (including PDF uploads) are only read after
+  sign-in is verified.
+- The backend has no database access of its own. It only processes rows the browser already read
+  under RLS, and rejects (403) any request containing a row whose `user_id` isn't the signed-in
+  user's.
+- Rate limits are per signed-in user: AI features 30 per 15 minutes and 100 per day (shared across
+  Coach, Chat, and Lab Insights); PDF imports 10 per 15 minutes and 20 per day. Repeated failed
+  sign-in attempts are limited to 20 per 15 minutes per IP. Limits are held in memory, so they
+  reset when the server restarts and are per server instance.
 - Errors returned to the client and written to server logs are sanitized — never raw stack traces,
-  full error objects, request bodies, or record contents.
+  full error objects, request bodies, record contents, or sign-in tokens (malformed or oversized
+  request bodies get a plain JSON error, not Express's default HTML page).
 
 ## PDF import limitations
 

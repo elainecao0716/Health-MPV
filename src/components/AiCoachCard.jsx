@@ -1,4 +1,5 @@
 import { memo, useState } from "react";
+import { apiFetch } from "../utils/apiFetch";
 
 function AiCoachCard({ records, goalWeight, checkins, labResults }) {
   const [advice, setAdvice] = useState(null);
@@ -12,7 +13,7 @@ function AiCoachCard({ records, goalWeight, checkins, labResults }) {
     setError(null);
 
     try {
-      const response = await fetch("/api/coach", {
+      const response = await apiFetch("/api/coach", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ records, goalWeight, checkins, labResults }),

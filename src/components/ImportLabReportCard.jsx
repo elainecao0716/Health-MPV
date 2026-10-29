@@ -11,6 +11,7 @@ import {
 } from "../utils/labDraftHelpers";
 import { rememberImportedFilename } from "../utils/importedReportFilenames";
 import { formatReferenceRange } from "../utils/formatReferenceRange";
+import { apiFetch } from "../utils/apiFetch";
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
 const LAB_CATEGORIES = ["CBC", "Metabolic", "Vitamins", "Lipids", "Thyroid", "Glucose", "Iron", "Other"];
@@ -164,7 +165,7 @@ function ImportLabReportCard({ labResults, currentUser, onImported, onDraftState
       const formData = new FormData();
       formData.append("file", file, file.name);
 
-      const response = await fetch("/api/labs/import-pdf", { method: "POST", body: formData });
+      const response = await apiFetch("/api/labs/import-pdf", { method: "POST", body: formData });
 
       let data = null;
       try {
